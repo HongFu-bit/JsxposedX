@@ -5,10 +5,10 @@ import 'package:JsxposedX/common/widgets/custom_text_field.dart';
 import 'package:JsxposedX/common/widgets/loading.dart';
 import 'package:JsxposedX/core/extensions/context_extensions.dart';
 import 'package:JsxposedX/core/models/app_info.dart';
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/features/app/data/models/app_info_dto.dart';
 import 'package:JsxposedX/features/app/presentation/providers/app_query_provider.dart';
 import 'package:JsxposedX/features/app/presentation/widgets/app_item.dart';
-import 'package:JsxposedX/generated/lsposed.g.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
@@ -197,7 +197,7 @@ class SelectAppSheet extends HookConsumerWidget {
   /// 处理添加应用到 LSPosed scope
   Future<void> _handleLSPosedScopeAdd(BuildContext context, AppInfo app) async {
     print('[LSPosed] 开始处理添加 ${app.packageName} 到作用域');
-    final lsposedApi = LSPosedNative();
+    final lsposedApi = NativeBridge.lsposed;
     
     // 先检查 LSPosed 是否可用
     try {

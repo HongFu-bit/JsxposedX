@@ -20,6 +20,13 @@ add_executable(${BINARY_NAME} WIN32
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
 
+# Sources in this target contain non-ASCII (Chinese) comments. Tell MSVC the
+# source encoding explicitly, otherwise it reports C4819 under code pages such
+# as 936, and the /WX from the standard settings turns that warning into an
+# error. Scoped to the runner on purpose: APPLY_STANDARD_SETTINGS is shared
+# with plugins, which this repo does not control.
+target_compile_options(${BINARY_NAME} PRIVATE /utf-8)
+
 # Add preprocessor definitions for the build version.
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION=\"${FLUTTER_VERSION}\"")
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_MAJOR=${FLUTTER_VERSION_MAJOR}")

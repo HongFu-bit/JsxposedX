@@ -1,7 +1,8 @@
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/generated/memory_tool.g.dart';
 
 class MemoryPointerAutoChaseActionDatasource {
-  final _native = MemoryToolNative();
+  final _native = NativeBridge.memoryTool;
 
   Future<void> startPointerAutoChase({
     required PointerAutoChaseRequest request,

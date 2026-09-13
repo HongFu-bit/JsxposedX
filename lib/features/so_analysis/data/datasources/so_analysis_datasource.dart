@@ -1,7 +1,8 @@
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/generated/so_analysis.g.dart';
 
 class SoAnalysisDatasource {
-  final _native = SoAnalysisNative();
+  final _native = NativeBridge.soAnalysis;
 
   Future<SoElfHeader> parseSoHeader(String sessionId, String soPath) =>
       _native.parseSoHeader(sessionId, soPath);

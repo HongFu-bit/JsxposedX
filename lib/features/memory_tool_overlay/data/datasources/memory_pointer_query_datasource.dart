@@ -1,7 +1,8 @@
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/generated/memory_tool.g.dart';
 
 class MemoryPointerQueryDatasource {
-  final _native = MemoryToolNative();
+  final _native = NativeBridge.memoryTool;
 
   Future<PointerScanSessionState> getPointerScanSessionState() async {
     return await _native.getPointerScanSessionState();

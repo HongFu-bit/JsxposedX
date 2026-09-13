@@ -4,6 +4,7 @@ import 'package:JsxposedX/common/pages/toast.dart';
 import 'package:JsxposedX/common/widgets/loading.dart';
 import 'package:JsxposedX/common/widgets/ref_error.dart';
 import 'package:JsxposedX/core/extensions/context_extensions.dart';
+import 'package:JsxposedX/core/layout/layout_breakpoints.dart';
 import 'package:JsxposedX/core/providers/status_management_provider.dart';
 import 'package:JsxposedX/core/routes/routes/home_route.dart';
 import 'package:JsxposedX/core/utils/url_helper.dart';
@@ -51,7 +52,7 @@ class HomeTab extends HookConsumerWidget {
       return () => timer?.cancel();
     }, const []);
 
-    return CustomScrollView(
+    final content = CustomScrollView(
       slivers: [
         SliverPadding(
           padding: EdgeInsets.fromLTRB(0, 8.h, 0, 24.h),
@@ -143,6 +144,20 @@ class HomeTab extends HookConsumerWidget {
           ),
         ),
       ],
+    );
+
+    // 宽屏（桌面端）把首页内容限制在舒适宽度内居中：状态卡铺满整屏时，
+    // 标题与数值会离得过远，反而不好读。窄屏直接返回，行为与改造前一致。
+    if (!(context.isWideLayout && context.isDesktopPlatform)) {
+      return content;
+    }
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: LayoutBreakpoints.maxSingleColumnWidth,
+        ),
+        child: content,
+      ),
     );
   }
 

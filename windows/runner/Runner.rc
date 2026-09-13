@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.jsxposed.x" "\0"
-            VALUE "FileDescription", "jsxposed_x" "\0"
+            VALUE "FileDescription", "JsxposedX" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "jsxposed_x" "\0"
+            VALUE "InternalName", "JsxposedX" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.jsxposed.x. All rights reserved." "\0"
-            VALUE "OriginalFilename", "jsxposed_x.exe" "\0"
-            VALUE "ProductName", "jsxposed_x" "\0"
+            VALUE "OriginalFilename", "JsxposedX.exe" "\0"
+            VALUE "ProductName", "JsxposedX" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

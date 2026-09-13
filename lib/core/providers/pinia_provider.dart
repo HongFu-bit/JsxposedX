@@ -1,3 +1,4 @@
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/generated/pinia.g.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
@@ -7,7 +8,7 @@ part 'pinia_provider.g.dart';
 /// 使用 Android 原生 SharedPreferences 实现持久化存储
 @riverpod
 PiniaNative pinia(ref) {
-  return PiniaNative();
+  return NativeBridge.pinia;
 }
 
 /// Pinia 存储服务包装类

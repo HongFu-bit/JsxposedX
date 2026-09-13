@@ -1,10 +1,10 @@
 import 'dart:convert';
 
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/features/project/data/models/dialog_keyword_dto.dart';
-import 'package:JsxposedX/generated/pinia.g.dart';
 
 class QuickFunctionsConfigActionDataSource {
-  final _native = PiniaNative();
+  final _native = NativeBridge.pinia;
 
   Future<void> setQuickFunctionStatus({
     required String packageName,

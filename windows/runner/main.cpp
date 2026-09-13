@@ -26,7 +26,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
-  Win32Window::Size size(1280, 720);
+  // Restored size (used after the user un-maximizes). The window is maximized on
+  // startup right after the first frame - see flutter_window.cpp - so this is a
+  // wide default that suits the two-pane layout.
+  Win32Window::Size size(1440, 900);
   if (!window.Create(L"JsxposedX", origin, size)) {
     return EXIT_FAILURE;
   }

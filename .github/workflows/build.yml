@@ -60,13 +60,13 @@ jobs:
               $types   = @('debug')
             }
             'push' {
-              if ($isTag) {
-                $flavors = @('api100','api101')
-                $types   = @('release')
-              } else {
-                $flavors = @('api100','api101')
-                $types   = @('debug')
-              }
+              # Release for every push, not just tags: the desktop-side tools install
+              # these artifacts directly, and a debug APK is signed with a keystore the
+              # runner generates from scratch each run, so every new debug build would
+              # need an uninstall (wiping app data) before it could be installed.
+              # Use workflow_dispatch if a debug build is needed.
+              $flavors = @('api100','api101')
+              $types   = @('release')
             }
             default {
               $flavors = @('api100')
@@ -144,6 +144,52 @@ jobs:
       - name: Pigeon codegen (one-shot)
         shell: pwsh
         run: ./.buildScript/pigen_watch.ps1 -Once
+
+      - name: Set up release signing
+        shell: pwsh
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          # android/app/build.gradle.kts reads android/key.properties and only then
+          # creates the "release" signing config, so both files have to exist before
+          # Gradle configures. Neither file is committed - the keystore arrives as a
+          # base64 secret and is written fresh into every runner.
+          $keystorePath = 'android/jsxposedx-release.jks'
+          $propertiesPath = 'android/key.properties'
+
+          if ([string]::IsNullOrWhiteSpace($env:KEYSTORE_BASE64)) {
+            Write-Host 'ANDROID_KEYSTORE_BASE64 is not set.'
+            Write-Host 'Release APKs will come out UNSIGNED (app-<flavor>-release-unsigned.apk) and cannot be installed.'
+            exit 0
+          }
+
+          foreach ($name in @('KEYSTORE_PASSWORD', 'KEY_ALIAS', 'KEY_PASSWORD')) {
+            $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              Write-Error "Secret $name is missing. All four signing secrets must be set."
+              exit 1
+            }
+          }
+
+          [IO.File]::WriteAllBytes(
+            $keystorePath,
+            [Convert]::FromBase64String($env:KEYSTORE_BASE64)
+          )
+
+          # storeFile is resolved with rootProject.file(), and the Gradle root here is
+          # android/, so a bare filename points at android/jsxposedx-release.jks.
+          # Java reads .properties as ISO-8859-1: keep the passwords ASCII.
+          @(
+            'storeFile=jsxposedx-release.jks'
+            "storePassword=$env:KEYSTORE_PASSWORD"
+            "keyAlias=$env:KEY_ALIAS"
+            "keyPassword=$env:KEY_PASSWORD"
+          ) | Set-Content -Path $propertiesPath -Encoding utf8
+
+          Write-Host "Wrote $propertiesPath and $keystorePath"
 
       - name: Build APK (${{ matrix.flavor }} / ${{ matrix.build_type }})
         shell: pwsh

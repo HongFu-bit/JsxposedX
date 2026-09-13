@@ -1,7 +1,8 @@
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/generated/apk_analysis.g.dart';
 
 class ApkAnalysisQueryDatasource {
-  final _native = ApkAnalysisNative();
+  final _native = NativeBridge.apkAnalysis;
 
   Future<List<ApkAsset>> getApkAssets(String sessionId) async =>
       await _native.getApkAssets(sessionId);

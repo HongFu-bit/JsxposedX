@@ -1,8 +1,9 @@
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/generated/app.g.dart';
 
 /// 应用查询数据源 (已迁移至 Pigeon)
 class AppQueryDatasource {
-  final _native = AppNative();
+  final _native = NativeBridge.app;
 
   /// 获取应用总数
   Future<int> getAppCount({required bool includeSystemApps, String query = ""}) async {

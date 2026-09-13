@@ -8,13 +8,13 @@ import 'package:JsxposedX/core/extensions/context_extensions.dart';
 import 'package:JsxposedX/core/routes/routes/home_route.dart';
 import 'package:JsxposedX/core/utils/js_formatter.dart';
 import 'package:JsxposedX/core/utils/path_utils.dart';
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/features/frida/presentation/providers/frida_action_provider.dart';
 import 'package:JsxposedX/features/frida/presentation/providers/frida_query_provider.dart';
 import 'package:JsxposedX/features/frida/presentation/constants/frida_prompts.dart';
 import 'package:JsxposedX/features/xposed/presentation/providers/logcat_provider.dart';
 import 'package:JsxposedX/features/xposed/presentation/widgets/editor_tab_button.dart';
 import 'package:JsxposedX/features/xposed/presentation/widgets/logcat_panel_view.dart';
-import 'package:JsxposedX/generated/app.g.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -185,7 +185,7 @@ class FridaEditorPage extends HookConsumerWidget {
                 await _saveScript(ref, controller.text);
                 ref.read(logcatProvider.notifier).start(packageName);
                 // 先启动 App
-                AppNative().openAppX(packageName);
+                NativeBridge.app.openAppX(packageName);
                 // 等待一下让 App 启动
                 await Future.delayed(const Duration(milliseconds: 500));
                 // 再注入脚本

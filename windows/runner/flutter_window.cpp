@@ -29,6 +29,10 @@ bool FlutterWindow::OnCreate() {
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
+    // The desktop UI is the phone UI, and it switches to a two-pane layout on
+    // wide windows, so start maximized. This must run after Show(), which calls
+    // SW_SHOWNORMAL internally and would otherwise undo the maximized state.
+    ::ShowWindow(this->GetHandle(), SW_SHOWMAXIMIZED);
   });
 
   // Flutter can complete the first frame before the "show window" callback is

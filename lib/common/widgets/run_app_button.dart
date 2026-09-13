@@ -1,4 +1,4 @@
-import 'package:JsxposedX/generated/app.g.dart';
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:flutter/material.dart';
 
 class RunAppButton extends StatelessWidget {
@@ -14,7 +14,7 @@ class RunAppButton extends StatelessWidget {
       tooltip: "run",
       onPressed: () {
         onClick?.call();
-        AppNative().openAppX(packageName);
+        NativeBridge.app.openAppX(packageName);
       },
     );
   }

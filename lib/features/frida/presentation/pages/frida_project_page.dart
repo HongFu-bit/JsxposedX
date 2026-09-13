@@ -7,10 +7,12 @@ import 'package:JsxposedX/common/widgets/custom_text_field.dart';
 import 'package:JsxposedX/common/widgets/loading.dart';
 import 'package:JsxposedX/common/widgets/ref_error.dart';
 import 'package:JsxposedX/core/extensions/context_extensions.dart';
+import 'package:JsxposedX/core/layout/two_pane_layout.dart';
 import 'package:JsxposedX/core/providers/status_management_provider.dart';
 import 'package:JsxposedX/core/routes/routes/home_route.dart';
 import 'package:JsxposedX/core/utils/file_picker_util.dart';
 import 'package:JsxposedX/core/utils/path_utils.dart';
+import 'package:JsxposedX/features/frida/presentation/pages/frida_editor_page.dart';
 import 'package:JsxposedX/features/frida/presentation/providers/frida_action_provider.dart';
 import 'package:JsxposedX/features/frida/presentation/providers/frida_query_provider.dart';
 import 'package:JsxposedX/generated/status_management.g.dart';
@@ -237,6 +239,18 @@ class FridaProjectPage extends HookConsumerWidget {
     );
   }
 
+  /// 宽屏双栏右侧的脚本编辑器。
+  ///
+  /// 编辑器页面是构造函数传参、不依赖路由状态，可以原样内嵌；
+  /// key 跟随脚本路径变化，避免切换脚本时复用上一个编辑器的内部状态。
+  Widget _buildEditorPane(String scriptPath) {
+    return FridaEditorPage(
+      key: ValueKey<String>(scriptPath),
+      packageName: packageName,
+      path: scriptPath,
+    );
+  }
+
   Widget _buildScriptTile(
     BuildContext context,
     WidgetRef ref, {
@@ -245,14 +259,17 @@ class FridaProjectPage extends HookConsumerWidget {
     required bool enabled,
     required bool moduleReady,
     required bool targetEnabled,
+    VoidCallback? onOpenScript,
   }) {
     return ListTile(
-      onTap: () {
-        context.push(
-          HomeRoute.toFridaEditor(packageName: packageName),
-          extra: scriptPath,
-        );
-      },
+      onTap:
+          onOpenScript ??
+          () {
+            context.push(
+              HomeRoute.toFridaEditor(packageName: packageName),
+              extra: scriptPath,
+            );
+          },
       onLongPress: () => _showDeleteDialog(context, ref, scriptPath),
       contentPadding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 2.h),
       leading: CircleAvatar(
@@ -302,7 +319,23 @@ class FridaProjectPage extends HookConsumerWidget {
       getFridaTargetStatusProvider(packageName: packageName),
     );
 
-    return Scaffold(
+    // 宽屏（桌面端）：列表 + 编辑器双栏；窄屏保持原来的"点脚本跳编辑器页面"。
+    final useTwoPaneLayout = context.isWideLayout && context.isDesktopPlatform;
+    final selectedScript = useState<String?>(null);
+    VoidCallback? openScriptHandler(String scriptPath) => useTwoPaneLayout
+        ? () => selectedScript.value = scriptPath
+        : null;
+
+    return TwoPaneScaffold(
+      enabled: useTwoPaneLayout,
+      detail: selectedScript.value == null
+          ? TwoPaneEmptyDetail(
+              message: context.isChinese
+                  ? '从左侧选择一个脚本，编辑器会在这里打开'
+                  : 'Pick a script on the left — the editor opens here.',
+            )
+          : _buildEditorPane(selectedScript.value!),
+      scaffold: Scaffold(
       appBar: AppBar(
         title: const Text("Frida Scripts"),
         actions: [
@@ -438,6 +471,7 @@ class FridaProjectPage extends HookConsumerWidget {
                               enabled: enabled,
                               moduleReady: false,
                               targetEnabled: false,
+                              onOpenScript: openScriptHandler(scriptPath),
                             );
                           }
 
@@ -450,6 +484,7 @@ class FridaProjectPage extends HookConsumerWidget {
                               enabled: enabled,
                               moduleReady: true,
                               targetEnabled: masterEnabled,
+                              onOpenScript: openScriptHandler(scriptPath),
                             ),
                             error: (_, __) => _buildScriptTile(
                               context,
@@ -459,6 +494,7 @@ class FridaProjectPage extends HookConsumerWidget {
                               enabled: enabled,
                               moduleReady: true,
                               targetEnabled: false,
+                              onOpenScript: openScriptHandler(scriptPath),
                             ),
                             loading: () => const Loading(),
                           );
@@ -471,6 +507,7 @@ class FridaProjectPage extends HookConsumerWidget {
                           enabled: enabled,
                           moduleReady: false,
                           targetEnabled: false,
+                          onOpenScript: openScriptHandler(scriptPath),
                         ),
                         loading: () => const Loading(),
                       );
@@ -497,6 +534,7 @@ class FridaProjectPage extends HookConsumerWidget {
             loading: () => const Loading(),
           ),
         ),
+      ),
       ),
     );
   }

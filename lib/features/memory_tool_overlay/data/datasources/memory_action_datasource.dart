@@ -1,7 +1,8 @@
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/generated/memory_tool.g.dart';
 
 class MemoryActionDatasource {
-  final _native = MemoryToolNative();
+  final _native = NativeBridge.memoryTool;
 
   Future<void> firstScan({required FirstScanRequest request}) async {
     await _native.firstScan(request);

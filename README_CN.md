@@ -265,6 +265,30 @@ flutter attach
 
 安装完成后，再到设备侧做 LSPosed/Xposed 或 Zygisk/Frida 验证。
 
+## 桌面端（通过 USB 控制手机）
+
+仓库支持把整套界面搬到电脑上运行：**UI 与业务逻辑仍复用 `lib/` 下的同一份代码，原生能力通过 USB 由手机执行**，所以桌面端与手机端的功能和结论保持一致。
+
+- 架构与协议说明：[`docs/desktop_bridge_CN.md`](docs/desktop_bridge_CN.md)
+- 桌面端入口：`lib/desktop/main_desktop.dart`
+- 手机侧服务：`android/app/src/main/kotlin/com/jsxposed/x/core/desktop_bridge/`
+- 一键启动脚本（开发调试，支持热重载）：
+
+```powershell
+# 自动完成 adb forward、读取令牌、启动桌面端
+.\.buildScript\run_desktop_bridge.ps1
+```
+
+- 打可分发的 exe（release）：
+
+```powershell
+# 产出 build/desktop/JsxposedX/JsxposedX.exe 与同名 zip，
+# 并会把 adb 一并打进 platform-tools 目录，所以双击 exe 就能自己连手机
+.\.buildScript\build_desktop_exe.ps1
+```
+
+原理简述：桌面端把 `dev.flutter.pigeon.JsxposedX.*` 的 Pigeon 通道原样隧道到手机上，由手机 App 内已注册的 Pigeon Handler 执行（104 个方法无需逐个适配）。宽屏（最大化窗口）下界面走侧边导航与双栏布局。
+
 ## 说明
 
 - 当前仓库里的共享脚本都是 PowerShell 脚本。

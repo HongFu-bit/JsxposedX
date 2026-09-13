@@ -1,4 +1,5 @@
-﻿import 'package:JsxposedX/l10n/app_localizations.dart';
+﻿import 'package:JsxposedX/core/layout/layout_breakpoints.dart';
+import 'package:JsxposedX/l10n/app_localizations.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -43,4 +44,15 @@ extension BuildContextExtensions on BuildContext {
   bool get isZh => Localizations.localeOf(this).languageCode == 'zh';
 
   bool get isEn => Localizations.localeOf(this).languageCode == 'en';
+
+  /// 是否宽屏（>= 1280）：启用双栏布局与侧边导航。
+  /// 注意：宽屏分支通常还要叠加 [isDesktopPlatform] 判断，
+  /// 以保证手机端（哪怕横屏）渲染路径与改造前完全一致。
+  bool get isWideLayout => screenWidth >= LayoutBreakpoints.wide;
+
+  /// 是否达到中等宽度（>= 760）：适合把单列内容限制宽度后居中。
+  bool get isMediumLayout => screenWidth >= LayoutBreakpoints.medium;
+
+  /// 是否运行在桌面端（Windows / Linux / macOS）。
+  bool get isDesktopPlatform => LayoutBreakpoints.isDesktopPlatform;
 }

@@ -5,7 +5,7 @@ import 'package:JsxposedX/core/extensions/context_extensions.dart';
 import 'package:JsxposedX/core/models/app_info.dart';
 import 'package:JsxposedX/core/providers/status_management_provider.dart';
 import 'package:JsxposedX/core/routes/routes/home_route.dart';
-import 'package:JsxposedX/generated/zygisk_frida.g.dart';
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:go_router/go_router.dart';
@@ -82,7 +82,7 @@ class ProjectMenuSheet extends HookConsumerWidget {
         color: Colors.blueGrey,
         onTap: () {
           Future.microtask(() async {
-            final installed = await ZygiskFridaNative().isModuleInstalled();
+            final installed = await NativeBridge.zygiskFrida.isModuleInstalled();
             if (!context.mounted) return;
             if (!installed) {
               ToastMessage.show(context.l10n.zygiskFridaModuleNotInstalled);

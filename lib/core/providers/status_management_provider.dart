@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/generated/status_management.g.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
@@ -8,7 +9,7 @@ part 'status_management_provider.g.dart';
 /// 状态管理原生接口 Provider
 @riverpod
 StatusManagementNative statusManagementNative(Ref ref) {
-  return StatusManagementNative();
+  return NativeBridge.statusManagement;
 }
 
 /// Hook 状态 Provider

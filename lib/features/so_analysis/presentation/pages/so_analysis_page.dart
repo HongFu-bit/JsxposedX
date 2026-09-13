@@ -34,6 +34,53 @@ class SoAnalysisPage extends HookConsumerWidget {
       'Sections',
     ];
 
+    // 六个分区的内容与改造前完全一致，只是宽屏下把顶部的 TabBar 换成左侧分区导航。
+    final tabBodies = <Widget>[
+      _ElfInfoTab(sessionId: sessionId, soPath: soPath),
+      _SymbolsTab(
+        sessionId: sessionId,
+        soPath: soPath,
+        exported: true,
+        packageName: packageName,
+      ),
+      _SymbolsTab(
+        sessionId: sessionId,
+        soPath: soPath,
+        exported: false,
+        packageName: packageName,
+      ),
+      _JniTab(sessionId: sessionId, soPath: soPath, packageName: packageName),
+      _StringsTab(sessionId: sessionId, soPath: soPath),
+      _SectionsTab(sessionId: sessionId, soPath: soPath),
+    ];
+
+    // 宽屏（桌面端）：左侧分区导航 + 右侧内容，分区名一直可见，也省下顶部一行。
+    if (context.isWideLayout && context.isDesktopPlatform) {
+      return Scaffold(
+        appBar: AppBar(title: Text(soPath.split('/').last)),
+        body: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            _SoSectionRail(
+              sections: tabs,
+              currentIndex: tabIndex.value,
+              onSelected: (index) => tabIndex.value = index,
+            ),
+            VerticalDivider(
+              width: 1,
+              thickness: 1,
+              color: context.colorScheme.outline.withValues(
+                alpha: context.isDark ? 0.28 : 0.16,
+              ),
+            ),
+            Expanded(
+              child: IndexedStack(index: tabIndex.value, children: tabBodies),
+            ),
+          ],
+        ),
+      );
+    }
+
     return DefaultTabController(
       length: tabs.length,
       child: Scaffold(
@@ -45,31 +92,70 @@ class SoAnalysisPage extends HookConsumerWidget {
             onTap: (i) => tabIndex.value = i,
           ),
         ),
-        body: IndexedStack(
-          index: tabIndex.value,
-          children: [
-            _ElfInfoTab(sessionId: sessionId, soPath: soPath),
-            _SymbolsTab(
-              sessionId: sessionId,
-              soPath: soPath,
-              exported: true,
-              packageName: packageName,
+        body: IndexedStack(index: tabIndex.value, children: tabBodies),
+      ),
+    );
+  }
+}
+
+/// 宽屏下的 SO 分析分区导航（窄屏使用 AppBar 里的 TabBar，不走这里）。
+class _SoSectionRail extends StatelessWidget {
+  const _SoSectionRail({
+    required this.sections,
+    required this.currentIndex,
+    required this.onSelected,
+  });
+
+  final List<String> sections;
+  final int currentIndex;
+  final ValueChanged<int> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = context.colorScheme;
+
+    return SizedBox(
+      width: 180,
+      child: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+        children: <Widget>[
+          for (int index = 0; index < sections.length; index++)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: Material(
+                color: currentIndex == index
+                    ? colorScheme.primary.withValues(
+                        alpha: context.isDark ? 0.16 : 0.10,
+                      )
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => onSelected(index),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 9,
+                    ),
+                    child: Text(
+                      sections[index],
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: currentIndex == index
+                            ? FontWeight.w700
+                            : FontWeight.w500,
+                        color: currentIndex == index
+                            ? colorScheme.primary
+                            : colorScheme.onSurface.withValues(alpha: 0.62),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ),
-            _SymbolsTab(
-              sessionId: sessionId,
-              soPath: soPath,
-              exported: false,
-              packageName: packageName,
-            ),
-            _JniTab(
-              sessionId: sessionId,
-              soPath: soPath,
-              packageName: packageName,
-            ),
-            _StringsTab(sessionId: sessionId, soPath: soPath),
-            _SectionsTab(sessionId: sessionId, soPath: soPath),
-          ],
-        ),
+        ],
       ),
     );
   }

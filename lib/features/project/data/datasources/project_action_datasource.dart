@@ -1,9 +1,9 @@
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/features/project/data/models/audit_log_dto.dart';
-import 'package:JsxposedX/generated/pinia.g.dart';
 import 'package:JsxposedX/generated/project.g.dart';
 
 class ProjectActionDatasource {
-  final _native = ProjectNative();
+  final _native = NativeBridge.project;
 
   Future<void> initProject() async {
     await _native.initProject();
@@ -62,7 +62,7 @@ class ProjectActionDatasource {
     required String packageName,
     required String code,
   }) async {
-    await PiniaNative().setString(
+    await NativeBridge.pinia.setString(
       key: "${packageName}_audit_log_js_code",
       value: code,
     );

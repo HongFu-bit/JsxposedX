@@ -1,12 +1,10 @@
 import 'package:JsxposedX/core/utils/path_utils.dart';
-import 'package:JsxposedX/generated/pinia.g.dart';
-import 'package:JsxposedX/generated/project.g.dart';
-import 'package:JsxposedX/generated/zygisk_frida.g.dart';
+import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 
 class FridaActionDatasource {
-  final _native = ProjectNative();
-  final _piniaNative = PiniaNative();
-  final _zygiskFridaNative = ZygiskFridaNative();
+  final _native = NativeBridge.project;
+  final _piniaNative = NativeBridge.pinia;
+  final _zygiskFridaNative = NativeBridge.zygiskFrida;
 
   Future<void> createFridaScript({
     required String packageName,

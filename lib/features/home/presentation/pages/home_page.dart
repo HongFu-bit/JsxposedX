@@ -12,6 +12,7 @@ import 'package:JsxposedX/features/home/presentation/providers/check_query_provi
 import 'package:JsxposedX/features/home/presentation/utils/update_check_helper.dart';
 import 'package:JsxposedX/features/home/presentation/widgets/home_bottom_bar.dart';
 import 'package:JsxposedX/features/home/presentation/widgets/home_center_dock_button.dart';
+import 'package:JsxposedX/features/home/presentation/widgets/home_nav_sidebar.dart';
 import 'package:JsxposedX/features/home/presentation/widgets/notice_bottom_sheet.dart';
 import 'package:JsxposedX/features/home/presentation/widgets/select_app_sheet.dart';
 import 'package:JsxposedX/features/home/presentation/widgets/update_check_dialog.dart';
@@ -40,6 +41,10 @@ class HomePage extends HookConsumerWidget {
     final versionCode = useState(0);
     // PageView 控制器
     final pageController = usePageController(initialPage: 0);
+
+    // 宽屏（桌面端）改为左侧导航 + 双栏容器；窄屏保持原来的底部导航，
+    // 手机端渲染路径与改造前完全一致。
+    final isWideLayout = context.isWideLayout && context.isDesktopPlatform;
     // 页面列表
     final pages = [
       const HomeTab(),
@@ -78,6 +83,14 @@ class HomePage extends HookConsumerWidget {
         filledIcon: Icons.settings,
       ),
     ];
+
+    final pageView = PageView(
+      controller: pageController,
+      onPageChanged: (index) {
+        currentIndex.value = index;
+      },
+      children: pages,
+    );
 
     useEffect(() {
       Future.microtask(() async {
@@ -124,9 +137,10 @@ class HomePage extends HookConsumerWidget {
     return Scaffold(
       extendBody: true,
       floatingActionButtonAnimator: FloatingActionButtonAnimator.noAnimation,
-      floatingActionButtonLocation: LowerCenterDockedFabLocation(
-        offsetY: fabOffsetY,
-      ),
+      // 宽屏没有底部栏，中间停靠的 FAB 会悬空，因此改为右下角常规位置。
+      floatingActionButtonLocation: isWideLayout
+          ? FloatingActionButtonLocation.endFloat
+          : LowerCenterDockedFabLocation(offsetY: fabOffsetY),
       floatingActionButton: HomeCenterDockButton(
         colorScheme: colorScheme,
         size: fabSize,
@@ -206,24 +220,41 @@ class HomePage extends HookConsumerWidget {
         ],
         centerTitle: true,
       ),
-      body: Padding(
-        padding: EdgeInsets.symmetric(vertical: 8, horizontal: 10),
-        child: PageView(
-          controller: pageController,
-          onPageChanged: (index) {
-            currentIndex.value = index;
-          },
-          children: pages,
-        ),
-      ),
-      bottomNavigationBar: HomeBottomBar(
-        navItems: navItems,
-        currentIndex: currentIndex.value,
-        onTap: (index) => _changeTab(currentIndex, pageController, index),
-        fabSize: fabSize,
-        fabOffsetY: fabOffsetY,
-        height: bottomBarHeight,
-      ),
+      body: isWideLayout
+          ? Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                HomeNavSidebar(
+                  navItems: navItems,
+                  currentIndex: currentIndex.value,
+                  onTap: (index) =>
+                      _changeTab(currentIndex, pageController, index),
+                ),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 8,
+                      horizontal: 10,
+                    ),
+                    child: pageView,
+                  ),
+                ),
+              ],
+            )
+          : Padding(
+              padding: EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+              child: pageView,
+            ),
+      bottomNavigationBar: isWideLayout
+          ? null
+          : HomeBottomBar(
+              navItems: navItems,
+              currentIndex: currentIndex.value,
+              onTap: (index) => _changeTab(currentIndex, pageController, index),
+              fabSize: fabSize,
+              fabOffsetY: fabOffsetY,
+              height: bottomBarHeight,
+            ),
     );
   }
 }

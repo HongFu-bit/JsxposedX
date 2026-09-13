@@ -1,3 +1,4 @@
+import 'package:JsxposedX/core/layout/layout_breakpoints.dart';
 import 'package:JsxposedX/core/providers/locale_provider.dart';
 import 'package:JsxposedX/core/providers/theme_provider.dart';
 import 'package:JsxposedX/core/themes/app_theme.dart';
@@ -48,17 +49,22 @@ class AppBootstrap extends ConsumerWidget {
         ? ThemeMode.dark
         : ThemeMode.light;
 
-    return ScreenUtilInit(
-      designSize: const Size(375, 812),
-      minTextAdapt: true,
-      splitScreenMode: true,
-      builder: (context, child) {
-        return builder(
-          context,
-          locale,
-          lightTheme,
-          darkTheme,
-          themeMode,
+    // ScreenUtil 的设计基准要跟着窗口走，但 AppBootstrap 位于 MaterialApp **之上**，
+    // 那里取不到 MediaQuery（MediaQuery 由 MaterialApp/WidgetsApp 内部插入），
+    // 所以这里用 LayoutBuilder 的约束取真实窗口尺寸；顺带保证窗口缩放时会跟着更新。
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return ScreenUtilInit(
+          // Android 保持 375×812；桌面端取实际窗口尺寸（缩放系数为 1），
+          // 否则宽窗口会把整个界面等比放大数倍。见 LayoutBreakpoints。
+          designSize: LayoutBreakpoints.resolveScreenUtilDesignSize(
+            constraints.biggest,
+          ),
+          minTextAdapt: true,
+          splitScreenMode: true,
+          builder: (context, child) {
+            return builder(context, locale, lightTheme, darkTheme, themeMode);
+          },
         );
       },
     );
