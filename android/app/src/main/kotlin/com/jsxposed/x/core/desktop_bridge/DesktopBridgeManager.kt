@@ -23,9 +23,12 @@ import io.flutter.plugin.common.BinaryMessenger
  */
 object DesktopBridgeManager {
 
-    private companion object {
-        const val TAG = BridgeProtocol.LOG_TAG
-    }
+    // 注意：这里不能写成 `private companion object { const val TAG = ... }`——
+    // DesktopBridgeManager 本身就是一个 `object`，而 `object` 内不允许再声明 companion。
+    // 更要紧的是：一旦它有了 companion，`DesktopBridgeManager` 这个表达式在 Kotlin 里
+    // 会优先解析到那个 companion（而不是单例本身），别的文件里访问它会报
+    // "Cannot access 'companion object Companion': it is private"。直接声明常量即可。
+    private const val TAG = BridgeProtocol.LOG_TAG
 
     private val router = BridgeChannelRouter()
 
