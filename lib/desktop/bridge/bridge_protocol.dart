@@ -113,6 +113,10 @@ abstract final class BridgeProtocol {
   static const String errNotConnected = 'not-connected';
   static const String errTimeout = 'timeout';
 
+  /// 本端内部错误（例如加密初始化失败）。
+  /// 与手机侧 `BridgeProtocol.ERR_INTERNAL` 对应。
+  static const String errInternal = 'internal';
+
   /// Wi-Fi 链路新增的错误码（§8.4）。
   ///
   /// 前两个只有电脑会发；`locked` 是「被来源限速或全局节流」的**临时**状态，
