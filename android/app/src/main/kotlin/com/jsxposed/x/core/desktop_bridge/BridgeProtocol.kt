@@ -63,6 +63,22 @@ internal object BridgeProtocol {
      */
     const val T_TOKEN = "token"
 
+    /**
+     * 新增帧：电脑在**校验通过后**用它通知手机"从这里开始加密"（文档 §7.6）。
+     *
+     * 明文发送，且必须是校验通过后的第一帧——两端都在它之后启用帧加密，
+     * 所以它本身不能是加密的。
+     */
+    const val T_SECURED = "secured"
+
+    /**
+     * 加密信封：载荷是 AES-256-GCM 密封后的一帧（文档 §7.6）。
+     *
+     * 外层仍然是 NDJSON，这样两端的按行读取逻辑不用改；
+     * 代价是密文再做一次 base64，体积比明文多约 33%。
+     */
+    const val T_ENC = "enc"
+
     /** 帧字段名。 */
     const val K_TYPE = "t"
     const val K_VERSION = "v"
@@ -86,6 +102,14 @@ internal object BridgeProtocol {
     const val K_TRANSPORT = "transport"
     const val K_CLIENT_NAME = "clientName"
     const val K_DEVICE_ID = "deviceId"
+
+    /** 加密信封的字段名（文档 §7.6）。 */
+    const val K_SEQ = "n"
+    const val K_DATA = "d"
+
+    /** 能力协商里的字段名与套件名（文档 §7.6）。 */
+    const val K_CIPHER = "cipher"
+    const val CIPHER_A256GCM = "A256GCM"
 
     /** 错误码。 */
     const val ERR_AUTH = "auth"

@@ -101,6 +101,20 @@ internal class DesktopBridgeServer(
     var lastRejectMessage: String? = null
         private set
 
+    /**
+     * 当前连接上要使用的会话令牌（§7.6）。帧加密的密钥就是由它派生的。
+     *
+     * 两个来源：LAN 握手时手机出示的那个（自动重连路径），
+     * 或者电脑随后用 `token` 帧签发的新令牌（首次配对路径）。
+     * 收到 `secured` 时用它派生密钥。
+     */
+    @Volatile
+    private var sessionToken: String? = null
+
+    /** 非 null 表示本连接已启用帧加密；**仅 LAN 链路会启用**（USB 是本地可信通道）。 */
+    @Volatile
+    private var cipher: BridgeCipher? = null
+
     fun clearLastReject() {
         lastRejectCode = null
         lastRejectMessage = null
@@ -314,6 +328,10 @@ internal class DesktopBridgeServer(
                 clientKind = null
                 clientWriter = null
             }
+            // 加密是**每条连接独立**的：密钥由那条连接的会话令牌派生。
+            // 不清掉的话，下一条连接会带着上一条的密钥，直接解密失败。
+            cipher = null
+            sessionToken = null
             connection.close()
             LogX.i(TAG, "desktop client disconnected")
         }
@@ -369,6 +387,12 @@ internal class DesktopBridgeServer(
             }
         }
 
+        // LAN 链路：记住手机这次出示的令牌，它就是帧加密的密钥来源（§7.6）。
+        // 首次配对时这里拿不到令牌（出示的是 6 位码），要等电脑用 token 帧签发。
+        if (transportKind == BridgeProtocol.TRANSPORT_LAN) {
+            sessionToken = (credentialProvider() as? BridgeCredential.Session)?.value
+        }
+
         writeFrame(welcomeFrame(transportKind))
         return true
     }
@@ -408,21 +432,84 @@ internal class DesktopBridgeServer(
                 continue
             }
 
-            when (frame.optString(BridgeProtocol.K_TYPE)) {
-                BridgeProtocol.T_CALL -> onCall(frame)
-                BridgeProtocol.T_PING -> writeFrame(
-                    JSONObject()
-                        .put(BridgeProtocol.K_TYPE, BridgeProtocol.T_PONG)
-                        .put(BridgeProtocol.K_ID, frame.optLong(BridgeProtocol.K_ID))
-                )
-                // 这两个是 LAN 链路新增的、由电脑发来的帧，**必须显式处理**：
-                // readLoop 对未知帧类型只记日志并继续，漏掉会静默失效，表现为
-                // "配对成功了但下次还要重新输入校验码"或"看不到被拒的原因"。
-                BridgeProtocol.T_TOKEN -> onSessionToken(frame, transportKind)
-                BridgeProtocol.T_REJECT -> onPeerReject(frame)
-                else -> LogX.w(TAG, "unknown frame type:", frame.optString(BridgeProtocol.K_TYPE))
+            // 协议违规（例如解密失败）时 handleFrame 返回 false，直接断开。
+            if (!handleFrame(frame, transportKind)) {
+                break
             }
         }
+    }
+
+    /**
+     * 分发一帧。
+     *
+     * 加密信封在这里拆开：外层永远是 NDJSON，`enc` 的载荷是内层明文帧，
+     * 拆完再递归回来走同一套分派——**加密对上层逻辑完全透明**。
+     *
+     * @return false 表示协议违规，调用方应当断开连接。
+     */
+    private fun handleFrame(frame: JSONObject, transportKind: String): Boolean {
+        when (frame.optString(BridgeProtocol.K_TYPE)) {
+            BridgeProtocol.T_ENC -> {
+                val active = cipher
+                if (active == null) {
+                    LogX.w(TAG, "收到加密帧但本端还没启用加密，断开")
+                    return false
+                }
+                val inner = active.open(
+                    frame.optLong(BridgeProtocol.K_SEQ),
+                    frame.optString(BridgeProtocol.K_DATA),
+                )
+                if (inner == null) {
+                    LogX.w(TAG, "解密失败（被篡改 / 密钥不一致 / 重放），断开")
+                    return false
+                }
+                val innerFrame = try {
+                    JSONObject(inner)
+                } catch (t: Throwable) {
+                    LogX.w(TAG, "解密后的内容不是 JSON，断开")
+                    return false
+                }
+                return handleFrame(innerFrame, transportKind)
+            }
+
+            BridgeProtocol.T_CALL -> onCall(frame)
+            BridgeProtocol.T_PING -> writeFrame(
+                JSONObject()
+                    .put(BridgeProtocol.K_TYPE, BridgeProtocol.T_PONG)
+                    .put(BridgeProtocol.K_ID, frame.optLong(BridgeProtocol.K_ID))
+            )
+            BridgeProtocol.T_TOKEN -> onSessionToken(frame, transportKind)
+            BridgeProtocol.T_SECURED -> return onSecured(transportKind)
+            BridgeProtocol.T_REJECT -> onPeerReject(frame)
+            else -> LogX.w(TAG, "unknown frame type:", frame.optString(BridgeProtocol.K_TYPE))
+        }
+        return true
+    }
+
+    /**
+     * 电脑通知"校验通过，从这里开始加密"（§7.6）。
+     *
+     * 它是**明文发送的最后一帧**：两端都在它之后启用帧加密，所以它自己不能是加密的。
+     */
+    private fun onSecured(transportKind: String): Boolean {
+        if (transportKind != BridgeProtocol.TRANSPORT_LAN) {
+            // USB 链路是 adb forward 过来的本地可信通道，从来不做帧加密。
+            LogX.w(TAG, "usb 链路上不该出现 secured 帧，忽略")
+            return true
+        }
+        val token = sessionToken
+        if (token.isNullOrBlank()) {
+            LogX.w(TAG, "收到 secured 但还没有会话令牌，断开")
+            return false
+        }
+        cipher = try {
+            BridgeCipher.fromSessionToken(token)
+        } catch (t: Throwable) {
+            LogX.e(TAG, "派生加密密钥失败:", t)
+            return false
+        }
+        LogX.i(TAG, "frame encryption enabled")
+        return true
     }
 
     private fun onCall(frame: JSONObject) {
@@ -469,6 +556,8 @@ internal class DesktopBridgeServer(
             return
         }
         LogX.i(TAG, "session token issued by desktop, paired")
+        // 记住它——紧接着的 secured 帧要用它派生加密密钥（§7.6）。
+        sessionToken = token
         clearLastReject()
         onSessionTokenReceived(token, lastClientName)
     }
@@ -514,6 +603,10 @@ internal class DesktopBridgeServer(
         val caps = JSONObject()
             .put("prefixes", JSONArray().put(BridgeProtocol.CHANNEL_PREFIX))
             .put("maxFrameBytes", BridgeProtocol.MAX_FRAME_CHARS)
+            // 帧加密的套件名。电脑端在 LAN 链路上要求它存在（§7.6）：
+            // 版本不匹配时它宁可明确拒绝，也不会静默退回明文——
+            // 静默退回等于给攻击者留了一个降级开关。
+            .put(BridgeProtocol.K_CIPHER, BridgeProtocol.CIPHER_A256GCM)
 
         val frame = JSONObject()
             .put(BridgeProtocol.K_TYPE, BridgeProtocol.T_WELCOME)
@@ -571,8 +664,17 @@ internal class DesktopBridgeServer(
     private fun writeFrame(frame: JSONObject) {
         val executor = writeExecutor ?: return
         val writer = synchronized(writeLock) { clientWriter } ?: return
-        val line = frame.toString() + "\n"
+
+        val plaintext = frame.toString()
+        // 加密状态在**调用线程**取一次快照：决定要不要加密要看这一帧产生时的状态。
+        val active = cipher
+
         executor.execute {
+            // 加密放进这个**单线程** executor 里做——加密序号必须与写入顺序严格一致。
+            // writeFrame 有两个调用线程（主线程回 Pigeon 结果、读帧线程回 pong），
+            // 若在调用线程加密，两边可能分别拿到序号 5 和 6，却按 6、5 的顺序落盘，
+            // 对端会因为"计数器回退"把后到的那帧当成重放拒掉。
+            val line = (if (active == null) plaintext else active.seal(plaintext)) + "\n"
             synchronized(writeLock) {
                 try {
                     writer.write(line)

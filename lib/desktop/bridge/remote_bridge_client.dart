@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:JsxposedX/desktop/bridge/bridge_cipher.dart';
 import 'package:JsxposedX/desktop/bridge/bridge_protocol.dart';
 import 'package:JsxposedX/desktop/bridge/lan_listener.dart';
 import 'package:JsxposedX/desktop/bridge/paired_phone_store.dart';
@@ -53,14 +54,29 @@ class BridgeDeviceInfo {
 
   bool get isLan => transport == BridgeProtocol.transportLan;
 
-  static BridgeDeviceInfo fromJson(Map<String, dynamic> json) {
+  /// [deviceId] 与 [transport] 单独传进来，是因为手机把这两个字段放在
+  /// **welcome 帧的顶层**（与 `code` / `token` 并列），而不是放进嵌套的 `device`
+  /// 对象里。见 docs/desktop_bridge_lan_CN.md §8.2——手机侧
+  /// `DesktopBridgeServer.welcomeFrame()` 就是这么拼的。
+  ///
+  /// 早先这里只从嵌套的 `device` 里读，结果 `deviceId` 恒为空：首次用 6 位码
+  /// 配对能成功（那条路径不查表），但落盘时 deviceId 是空的，之后用令牌重连
+  /// 永远查不到记录，表现为"会话令牌已失效"并无限重试。
+  static BridgeDeviceInfo fromJson(
+    Map<String, dynamic> json, {
+    String? deviceId,
+    String? transport,
+  }) {
+    final resolvedDeviceId = deviceId ?? json['deviceId'] as String?;
     return BridgeDeviceInfo(
       model: json['model'] as String? ?? 'unknown',
       android: json['android'] as String? ?? 'unknown',
       sdk: json['sdk'] as int? ?? 0,
       appVersion: json['appVersion'] as String? ?? '',
-      deviceId: json['deviceId'] as String?,
-      transport: json['transport'] as String?,
+      deviceId: (resolvedDeviceId == null || resolvedDeviceId.isEmpty)
+          ? null
+          : resolvedDeviceId,
+      transport: transport ?? json['transport'] as String?,
     );
   }
 
@@ -155,6 +171,12 @@ class RemoteBridgeClient {
   bool _disposed = false;
   bool _manualClose = false;
   DateTime _lastFrameAt = DateTime.now();
+
+  /// 非 null 表示本连接已启用帧加密（§7.6）。
+  ///
+  /// 只在监听模式下会启用——USB / 拨号那条链路是 adb forward 过来的本地可信通道，
+  /// 而且没有"电脑签发的会话令牌"这个概念，不参与加密。
+  BridgeCipher? _cipher;
 
   Stream<BridgeConnectionPhase> get phaseStream => _phaseController.stream;
 
@@ -379,19 +401,30 @@ class RemoteBridgeClient {
     if (line.isEmpty) {
       return;
     }
+    if (!_handleLine(line)) {
+      // 协议违规：解密失败，或收到加密帧但本端还没启用加密。
+      // 这种连接不能再用了——继续读下去只会把垃圾当成指令。
+      debugPrint('[desktop-bridge] 加密协商失败，断开');
+      _handleDisconnected('加密协商失败');
+    }
+  }
 
+  /// 处理一行。@return false 表示协议违规，调用方应断开。
+  bool _handleLine(String line) {
     Object? decoded;
     try {
       decoded = jsonDecode(line);
     } catch (_) {
       debugPrint('[desktop-bridge] 忽略无法解析的帧');
-      return;
+      return true;
     }
     if (decoded is! Map<String, dynamic>) {
-      return;
+      return true;
     }
 
     switch (decoded[BridgeProtocol.kType]) {
+      case BridgeProtocol.tEnc:
+        return _onEncrypted(decoded);
       case BridgeProtocol.tWelcome:
         _onWelcome(decoded);
       case BridgeProtocol.tReject:
@@ -405,28 +438,60 @@ class RemoteBridgeClient {
       default:
         debugPrint('[desktop-bridge] 忽略未知帧：${decoded[BridgeProtocol.kType]}');
     }
+    return true;
+  }
+
+  /// 拆开一个 `enc` 信封，把内层明文帧送回同一套分派。
+  ///
+  /// **加密对上层逻辑完全透明**：`_onWelcome` / `_onReturn` 那些方法看到的是
+  /// 解出来的原始 JSON，跟不加密时一模一样。
+  bool _onEncrypted(Map<String, dynamic> frame) {
+    final active = _cipher;
+    if (active == null) {
+      debugPrint('[desktop-bridge] 收到加密帧但本端还没启用加密');
+      return false;
+    }
+    final seq = frame[BridgeProtocol.kSeq];
+    final data = frame[BridgeProtocol.kData];
+    if (seq is! int || data is! String) {
+      debugPrint('[desktop-bridge] 加密信封字段不完整');
+      return false;
+    }
+    final inner = active.open(seq, data);
+    if (inner == null) {
+      debugPrint('[desktop-bridge] 解密失败（被篡改 / 密钥不一致 / 重放）');
+      return false;
+    }
+    return _handleLine(inner);
   }
 
   void _onWelcome(Map<String, dynamic> frame) {
     final rawDevice = frame[BridgeProtocol.kDevice];
-    final device = rawDevice is Map<String, dynamic>
-        ? BridgeDeviceInfo.fromJson(rawDevice)
-        : const BridgeDeviceInfo(
-            model: 'unknown',
-            android: 'unknown',
-            sdk: 0,
-            appVersion: '',
-          );
+    final rawDeviceId = frame[BridgeProtocol.kDeviceId];
+    final rawTransport = frame[BridgeProtocol.kTransport];
+    final device = BridgeDeviceInfo.fromJson(
+      rawDevice is Map<String, dynamic> ? rawDevice : const <String, dynamic>{},
+      deviceId: rawDeviceId is String ? rawDeviceId : null,
+      transport: rawTransport is String ? rawTransport : null,
+    );
 
     // 监听模式下，welcome 是**手机出示凭据的地方**（§7.3）——校验不通过就在这里
     // 结束：回一个 reject，然后抛出异常让 _connectByListening 继续等下一条。
     if (isListening) {
-      final rejection = _validate(frame, device);
+      final validation = _validate(frame, device);
+      final rejection = validation.reject;
       if (rejection != null) {
-        // 先把 reject 发出去并 flush，再关 socket——直接 destroy 会把还没
-        // 落到内核缓冲区的帧一起丢掉，手机侧就只会看到"连不上"而看不到原因。
         unawaited(_rejectAndDrop(rejection));
         return;
+      }
+
+      // 校验通过。`secured` 是**明文发送的最后一帧**：两端都在它之后启用帧加密，
+      // 所以它自己不能是加密的（§7.6）。
+      final sessionToken = validation.sessionToken;
+      if (sessionToken != null && sessionToken.isNotEmpty) {
+        _send(<String, Object?>{BridgeProtocol.kType: BridgeProtocol.tSecured});
+        _cipher = BridgeCipher.fromSessionToken(sessionToken);
+        debugPrint('[desktop-bridge] 帧加密已启用');
       }
     }
 
@@ -462,12 +527,33 @@ class RemoteBridgeClient {
 
   /// 校验手机出示的凭据。
   ///
-  /// @return 需要回给手机的 `reject` 帧；通过时返回 null。
-  Map<String, Object?>? _validate(Map<String, dynamic> frame, BridgeDeviceInfo device) {
+  /// [reject] 非 null 表示要回给手机的 `reject` 帧；通过时 [sessionToken] 是
+  /// 本连接之后用来派生加密密钥的会话令牌（§7.6）。
+  ({Map<String, Object?>? reject, String? sessionToken}) _validate(
+    Map<String, dynamic> frame,
+    BridgeDeviceInfo device,
+  ) {
     final codes = pairingCode!;
     final store = phoneStore!;
     final deviceId = device.deviceId ?? '';
     final sourceIp = _socket?.remoteAddress.address ?? 'unknown';
+
+    // 版本协商：手机必须声明支持帧加密。缺了它就**明确拒绝**，而不是静默退回明文——
+    // 静默退回等于给攻击者留了一个降级开关（把 welcome 里的 caps 抹掉即可）。
+    // 实际后果也只是"新旧版本不能混用"，并且在界面上给出一句能看懂的话。
+    final caps = frame[BridgeProtocol.kCaps];
+    final cipherName = caps is Map<String, dynamic>
+        ? caps[BridgeProtocol.kCipher]
+        : null;
+    if (cipherName != BridgeProtocol.cipherA256Gcm) {
+      return (
+        reject: _rejectFrame(
+          BridgeProtocol.errProtocol,
+          '手机端版本过旧（不支持帧加密），请更新手机上的 JsxposedX。',
+        ),
+        sessionToken: null,
+      );
+    }
 
     // 路径一：会话令牌。**不受限速与节流影响**（§9.2）——令牌是 128 bit 随机值，
     // 不存在被枚举的风险；而如果把它一起限速，攻击者触发一次全局暂停就能让
@@ -479,11 +565,14 @@ class RemoteBridgeClient {
         codes.resetAfterSuccess();
         unawaited(store.touch(paired.deviceId));
         debugPrint('[desktop-bridge] 会话令牌校验通过：${paired.name}');
-        return null;
+        return (reject: null, sessionToken: submittedToken);
       }
-      return _rejectFrame(
-        BridgeProtocol.errCode,
-        '会话令牌已失效，请在手机上重新配对。',
+      return (
+        reject: _rejectFrame(
+          BridgeProtocol.errCode,
+          '会话令牌已失效，请在手机上重新配对。',
+        ),
+        sessionToken: null,
       );
     }
 
@@ -512,25 +601,34 @@ class RemoteBridgeClient {
           BridgeProtocol.kToken: issued,
         });
         debugPrint('[desktop-bridge] 校验码通过，已签发会话令牌');
-        return null;
+        return (reject: null, sessionToken: issued);
 
       case CodeAttemptOutcome.stale:
-        return _rejectFrame(
-          BridgeProtocol.errCodeStale,
-          '校验码刚刚刷新，请输入屏幕上新的 6 位数字。',
+        return (
+          reject: _rejectFrame(
+            BridgeProtocol.errCodeStale,
+            '校验码刚刚刷新，请输入屏幕上新的 6 位数字。',
+          ),
+          sessionToken: null,
         );
 
       case CodeAttemptOutcome.locked:
-        return _rejectFrame(
-          BridgeProtocol.errLocked,
-          codes.isPaused
-              ? '电脑已暂停校验，请稍后再试。'
-              : '尝试次数过多，请稍后再试。',
+        return (
+          reject: _rejectFrame(
+            BridgeProtocol.errLocked,
+            codes.isPaused
+                ? '电脑已暂停校验，请稍后再试。'
+                : '尝试次数过多，请稍后再试。',
+          ),
+          sessionToken: null,
         );
 
       case CodeAttemptOutcome.wrong:
       case CodeAttemptOutcome.empty:
-        return _rejectFrame(BridgeProtocol.errCode, '校验码不正确。');
+        return (
+          reject: _rejectFrame(BridgeProtocol.errCode, '校验码不正确。'),
+          sessionToken: null,
+        );
     }
   }
 
@@ -661,7 +759,11 @@ class RemoteBridgeClient {
       return;
     }
     try {
-      socket.write('${jsonEncode(frame)}\n');
+      // 加密**同步完成**：加密序号必须严格按发送顺序递增。
+      // 挪到异步里就可能乱序，对端会因为"计数器回退"把帧当成重放拒掉。
+      final active = _cipher;
+      final text = jsonEncode(frame);
+      socket.write('${active == null ? text : active.seal(text)}\n');
     } catch (error) {
       debugPrint('[desktop-bridge] 发送失败：$error');
     }
@@ -673,6 +775,9 @@ class RemoteBridgeClient {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _pendingBytes.clear();
+    // 加密是**每条连接独立**的：密钥由那条连接的会话令牌派生。
+    // 不清掉的话，下一条连接会带着上一条的密钥，握手一过就解密失败。
+    _cipher = null;
 
     final subscription = _socketSubscription;
     _socketSubscription = null;

@@ -68,6 +68,12 @@ abstract final class BridgeProtocol {
   /// 漏掉会表现为"配对成功了但下次还要重新配对"。
   static const String tToken = 'token';
 
+  /// 校验通过后、**明文发送的最后一帧**：通知手机"从这里开始加密"（§7.6）。
+  static const String tSecured = 'secured';
+
+  /// 加密信封：载荷是被 AES-256-GCM 密封的一帧。
+  static const String tEnc = 'enc';
+
   /// 帧字段名。
   static const String kType = 't';
   static const String kVersion = 'v';
@@ -89,6 +95,16 @@ abstract final class BridgeProtocol {
   static const String kTransport = 'transport';
   static const String kClientName = 'clientName';
   static const String kDeviceId = 'deviceId';
+
+  /// 加密信封的字段名（§7.6）。
+  static const String kSeq = 'n';
+
+  static const String kData = 'd';
+
+  /// 能力协商里的字段名与套件名（§7.6）。
+  static const String kCipher = 'cipher';
+
+  static const String cipherA256Gcm = 'A256GCM';
 
   /// 错误码。
   static const String errAuth = 'auth';
