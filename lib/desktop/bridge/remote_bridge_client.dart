@@ -217,7 +217,7 @@ class RemoteBridgeClient {
       }
 
       try {
-        return await _handshake(socket);
+        return await _performHandshake(socket);
       } on BridgeException catch (error) {
         debugPrint('[desktop-bridge] 本次连接未通过校验：${error.message}');
         await _teardownSocket();
@@ -241,12 +241,14 @@ class RemoteBridgeClient {
       _lastError = '无法连接 $host:$port（$error）。请确认已执行 adb forward 且手机 App 在前台。';
       throw BridgeException(BridgeProtocol.errNotConnected, _lastError!);
     }
-    return _handshake(socket);
+    return _performHandshake(socket);
   }
 
   // ------------------------------------------------------------ 握手（两种模式共用）
 
-  Future<BridgeDeviceInfo> _handshake(Socket socket) async {
+  /// 方法名刻意不叫 `_handshake`——那个名字已经被上面那个
+  /// `Completer<BridgeDeviceInfo>? _handshake` 字段占了，Dart 不允许同名字段与方法。
+  Future<BridgeDeviceInfo> _performHandshake(Socket socket) async {
     try {
       socket.setOption(SocketOption.tcpNoDelay, true);
     } catch (_) {
