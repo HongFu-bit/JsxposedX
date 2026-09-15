@@ -10,6 +10,8 @@ import com.jsxposed.x.core.bridge.zygisk_frida_native.ZygiskFridaNativeImpl
 import com.jsxposed.x.core.bridge.status_management_native.StatusManagementNative
 import com.jsxposed.x.core.bridge.status_management_native.StatusManagementNativeImpl
 import com.jsxposed.x.core.bridge.app_native.AppNativeImpl
+import com.jsxposed.x.core.bridge.lan_bridge_native.LanBridgeNative
+import com.jsxposed.x.core.bridge.lan_bridge_native.LanBridgeNativeImpl
 import com.jsxposed.x.core.bridge.memory_tool_native.MemoryToolNative
 import com.jsxposed.x.core.bridge.memory_tool_native.MemoryToolNativeImpl
 import com.jsxposed.x.core.bridge.pinia_native.PiniaNative
@@ -34,6 +36,9 @@ object NativeProvider {
         MemoryToolNative.setUp(messenger, MemoryToolNativeImpl(context))
         LSPosedNative.setUp(messenger, LSPosedNativeImpl(context))
         ZygiskFridaNative.setUp(messenger, ZygiskFridaNativeImpl(context))
+        // 「局域网直连」的原生接口。它读的是 DesktopBridgeManager 的状态，
+        // 因此桌面端连上之后也能通过隧道读到同一份数据（docs/desktop_bridge_lan_CN.md §11.1）。
+        LanBridgeNative.setUp(messenger, LanBridgeNativeImpl(context))
         OverlayFilePickerNative.register(context, messenger)
         UrlHelperNative.register(context, messenger)
     }

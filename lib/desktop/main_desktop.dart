@@ -1,8 +1,13 @@
+import 'dart:async';
+
 import 'package:JsxposedX/desktop/bridge/bridge_protocol.dart';
+import 'package:JsxposedX/desktop/bridge/lan_bridge_controller.dart';
 import 'package:JsxposedX/desktop/bridge/native_bridge.dart';
 import 'package:JsxposedX/desktop/bridge/remote_binary_messenger.dart';
 import 'package:JsxposedX/desktop/bridge/remote_bridge_client.dart';
 import 'package:JsxposedX/desktop/ui/desktop_connect_gate.dart';
+import 'package:JsxposedX/desktop/ui/desktop_overlay_host_runtime.dart';
+import 'package:JsxposedX/features/overlay_window/presentation/providers/overlay_window_host_runtime_provider.dart';
 import 'package:JsxposedX/main.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -20,7 +25,15 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 /// ```
 ///
 /// 连接成功后进入的界面就是 lib/main.dart 里的 [MainApp]——
-/// 与手机端是同一套页面和同一套 provider，区别只在于原生能力经 USB 由手机执行。
+/// 与手机端是同一套页面和同一套 provider，区别只在于原生能力经隧道由手机执行。
+///
+/// 两条链路在这里汇合（docs/desktop_bridge_lan_CN.md §10.3）：
+/// - **USB / 拨号**：[RemoteBridgeClient] 主动连 `127.0.0.1:port`，凭据由手机校验。
+/// - **Wi-Fi 直连**：[LanBridgeController] 里的 [RemoteBridgeClient] 是**监听模式**，
+///   socket 由它自己 bind，凭据（6 位码/会话令牌）由**电脑**校验。
+///
+/// 两者只能有一个生效，所以下面用一个 [_lanAttached] 标志决定当前把哪一条
+/// 接到 [NativeBridge] 上。
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -32,6 +45,13 @@ Future<void> main() async {
 
   runApp(
     ProviderScope(
+      // 桌面端没有悬浮窗：把宿主运行时换成替身，否则内存工具面板在构建时
+      // 就会去碰 flutter_overlay_window 而抛异常。手机端不受影响。
+      overrides: [
+        overlayWindowHostRuntimeProvider.overrideWith(
+          DesktopOverlayWindowHostRuntime.new,
+        ),
+      ],
       child: DesktopApp(
         initialPort: port,
         initialToken: token,
@@ -61,7 +81,11 @@ class _DesktopAppState extends State<DesktopApp> {
   late RemoteBridgeClient _client;
   late int _port;
   late String _token;
+  late final LanBridgeController _lan;
   bool _autoConnectPending = false;
+
+  /// LAN 那条是否已经接到 [NativeBridge] 上。
+  bool _lanAttached = false;
 
   @override
   void initState() {
@@ -69,14 +93,35 @@ class _DesktopAppState extends State<DesktopApp> {
     _port = widget.initialPort;
     _token = widget.initialToken;
     _autoConnectPending = widget.autoConnect && _token.isNotEmpty;
+    _lan = LanBridgeController();
     _client = _createClient(_port, _token);
+    _lan.stream.listen(_onLanState);
   }
 
   @override
   void dispose() {
     _client.dispose();
+    unawaited(_lan.dispose());
     NativeBridge.detachRemote();
     super.dispose();
+  }
+
+  /// LAN 连上/断开时，切换 [NativeBridge] 背后是哪条链路。
+  void _onLanState(LanSnapshot snapshot) {
+    if (snapshot.isConnected == _lanAttached) {
+      return;
+    }
+    final lanClient = _lan.client;
+    if (snapshot.isConnected && lanClient != null) {
+      NativeBridge.attachRemote(RemoteBinaryMessenger(client: lanClient));
+      _lanAttached = true;
+    } else {
+      NativeBridge.attachRemote(RemoteBinaryMessenger(client: _client));
+      _lanAttached = false;
+    }
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   /// 创建一个客户端，并把它的 messenger 注入到原生访问层。
@@ -88,6 +133,11 @@ class _DesktopAppState extends State<DesktopApp> {
 
   Future<void> _connect(int port, String token) async {
     _autoConnectPending = false;
+
+    // LAN 那条如果正连着，先让位——两条链路共用一个客户端槽位。
+    if (_lanAttached) {
+      await _lan.stopWaiting();
+    }
 
     // 端口或令牌变了就必须换客户端实例（两者都是构造期注入的 final 字段）。
     if (port != _client.port || token != _client.token) {
@@ -108,6 +158,10 @@ class _DesktopAppState extends State<DesktopApp> {
 
   @override
   Widget build(BuildContext context) {
+    if (_lanAttached) {
+      return const MainApp();
+    }
+
     return StreamBuilder<BridgeConnectionPhase>(
       stream: _client.phaseStream,
       initialData: _client.phase,
@@ -120,6 +174,7 @@ class _DesktopAppState extends State<DesktopApp> {
           initialToken: _token,
           onConnect: _connect,
           autoConnect: _autoConnectPending,
+          lanController: _lan,
         );
       },
     );

@@ -4,14 +4,27 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:JsxposedX/desktop/bridge/bridge_protocol.dart';
+import 'package:JsxposedX/desktop/bridge/lan_listener.dart';
+import 'package:JsxposedX/desktop/bridge/paired_phone_store.dart';
+import 'package:JsxposedX/desktop/bridge/pairing_code.dart';
 import 'package:flutter/foundation.dart';
 
 /// 与手机的连接状态。
 enum BridgeConnectionPhase {
+  /// 完全没有连接，也没有在等待。
   disconnected,
+
+  /// 拨号模式：正在往手机连。
   connecting,
+
+  /// 监听模式：已经 bind 在等手机连上来（界面在这期间显示 6 位码）。
+  waiting,
+
+  /// 已完成握手，正在校验凭据。
   authenticating,
+
   connected,
+
   rejected,
 }
 
@@ -23,6 +36,8 @@ class BridgeDeviceInfo {
     required this.android,
     required this.sdk,
     required this.appVersion,
+    this.deviceId,
+    this.transport,
   });
 
   final String model;
@@ -30,12 +45,22 @@ class BridgeDeviceInfo {
   final int sdk;
   final String appVersion;
 
+  /// 手机上报的稳定标识（LAN 链路；USB 没有这个字段）。
+  final String? deviceId;
+
+  /// `usb` 或 `lan`，用来在状态栏显示"已连接手机（Wi-Fi）"。
+  final String? transport;
+
+  bool get isLan => transport == BridgeProtocol.transportLan;
+
   static BridgeDeviceInfo fromJson(Map<String, dynamic> json) {
     return BridgeDeviceInfo(
       model: json['model'] as String? ?? 'unknown',
       android: json['android'] as String? ?? 'unknown',
       sdk: json['sdk'] as int? ?? 0,
       appVersion: json['appVersion'] as String? ?? '',
+      deviceId: json['deviceId'] as String?,
+      transport: json['transport'] as String?,
     );
   }
 
@@ -54,20 +79,52 @@ class BridgeException implements Exception {
   String toString() => 'BridgeException($code): $message';
 }
 
-/// 桌面端 → 手机的远程 bridge 客户端。
+/// 电脑端 → 手机的远程 bridge 客户端。
 ///
 /// 只负责"把 channel 名 + 原始字节送过去、把回包拿回来"，
 /// 不解析 Pigeon 载荷内容（那是生成代码的职责）。
+///
+/// 两种工作模式（文档 §10.3）：
+///
+/// - **拨号模式**（USB / 手动连接）：主动 `Socket.connect` 到 `host:port`。
+///   凭据是**手机出示**、手机校验——本类只把令牌放进 `hello`。
+/// - **监听模式**（Wi-Fi 直连）：自己不 bind，socket 由 [LanListener] 提供；
+///   连上之后由**本类校验手机出示的凭据**（`welcome.code` / `welcome.token`），
+///   校验通过才签发会话令牌、才进入 [BridgeConnectionPhase.connected]。
+///
+/// 第二条里那句"校验通过才进入 connected"是整套安全性的支点：`sendRaw` 在非
+/// connected 阶段直接丢弃调用，所以**校验通过前电脑不可能把任何 Pigeon 调用
+/// 发给对端**（§7.2）。这一条是现成的，不需要额外写防护。
 class RemoteBridgeClient {
   RemoteBridgeClient({
-    required this.port,
-    required this.token,
+    this.port = BridgeProtocol.defaultPort,
+    this.token = '',
     this.host = '127.0.0.1',
-  });
+    this.listener,
+    this.pairingCode,
+    this.phoneStore,
+  }) : assert(
+          listener == null || (pairingCode != null && phoneStore != null),
+          '监听模式必须同时提供 pairingCode 与 phoneStore，否则无法校验对端',
+        );
 
   final String host;
+
   final int port;
+
+  /// 拨号模式下放进 `hello` 的令牌（USB 链路用它；LAN 链路用不到）。
   final String token;
+
+  /// 非 null 即进入**监听模式**：socket 从它来，校验由本类做。
+  final LanListener? listener;
+
+  /// 监听模式下用来的 6 位码校验器；同样持有轮换与限速状态，界面直接读它。
+  final PairingCode? pairingCode;
+
+  /// 监听模式下用来签发/核对会话令牌。
+  final PairedPhoneStore? phoneStore;
+
+  bool get isListening => listener != null;
 
   final StreamController<BridgeConnectionPhase> _phaseController =
       StreamController<BridgeConnectionPhase>.broadcast();
@@ -107,7 +164,7 @@ class RemoteBridgeClient {
 
   String? get lastError => _lastError;
 
-  /// 连接并完成握手。
+  /// 连接并完成握手（监听模式下还会完成凭据校验）。
   Future<BridgeDeviceInfo> connect() async {
     if (_disposed) {
       throw const BridgeException(BridgeProtocol.errNotConnected, 'Client disposed.');
@@ -119,8 +176,60 @@ class RemoteBridgeClient {
     _failPending();
 
     _lastError = null;
-    _setPhase(BridgeConnectionPhase.connecting);
+    _setPhase(isListening ? BridgeConnectionPhase.waiting : BridgeConnectionPhase.connecting);
 
+    try {
+      final device = isListening ? await _connectByListening() : await _connectByDialing();
+      if (isListening) {
+        // **校验通过就立刻停监听**（文档 §10.3 第 4 点）。
+        // 这是 §9.2 里"暴露窗口只有几分钟"这个安全论证能够成立的前提：
+        // 手机真的连上之后，端口就不该再对外开着。
+        await listener!.close();
+      }
+      _device = device;
+      _reconnectAttempt = 0;
+      _setPhase(BridgeConnectionPhase.connected);
+      _startHeartbeat();
+      return device;
+    } on BridgeException catch (error) {
+      _lastError = error.message;
+      await _teardownSocket();
+      _setPhase(BridgeConnectionPhase.disconnected);
+      throw error;
+    }
+  }
+
+  // ------------------------------------------------------------ 监听模式
+
+  /// 反复接受连接、握手、校验，直到有一条通过。
+  ///
+  /// 未通过的连接不进入 `connected`，因此不会泄漏任何数据（§7.2）；
+  /// 这里只是把它关掉、继续等下一条。被拒绝的原因已经通过 `reject` 帧回给了手机。
+  Future<BridgeDeviceInfo> _connectByListening() async {
+    final pendingListener = listener!;
+    while (!_disposed && !_manualClose) {
+      final socket = await pendingListener.accept();
+      if (socket == null) {
+        throw const BridgeException(
+          BridgeProtocol.errNotConnected,
+          '监听已停止。',
+        );
+      }
+
+      try {
+        return await _handshake(socket);
+      } on BridgeException catch (error) {
+        debugPrint('[desktop-bridge] 本次连接未通过校验：${error.message}');
+        await _teardownSocket();
+        _setPhase(BridgeConnectionPhase.waiting);
+      }
+    }
+    throw const BridgeException(BridgeProtocol.errNotConnected, '客户端已关闭。');
+  }
+
+  // ------------------------------------------------------------ 拨号模式
+
+  Future<BridgeDeviceInfo> _connectByDialing() async {
     Socket socket;
     try {
       socket = await Socket.connect(
@@ -130,10 +239,14 @@ class RemoteBridgeClient {
       );
     } catch (error) {
       _lastError = '无法连接 $host:$port（$error）。请确认已执行 adb forward 且手机 App 在前台。';
-      _setPhase(BridgeConnectionPhase.disconnected);
       throw BridgeException(BridgeProtocol.errNotConnected, _lastError!);
     }
+    return _handshake(socket);
+  }
 
+  // ------------------------------------------------------------ 握手（两种模式共用）
+
+  Future<BridgeDeviceInfo> _handshake(Socket socket) async {
     try {
       socket.setOption(SocketOption.tcpNoDelay, true);
     } catch (_) {
@@ -142,6 +255,7 @@ class RemoteBridgeClient {
 
     _socket = socket;
     _lastFrameAt = DateTime.now();
+    _pendingBytes.clear();
 
     final handshake = Completer<BridgeDeviceInfo>();
     _handshake = handshake;
@@ -159,27 +273,33 @@ class RemoteBridgeClient {
     _send(<String, Object?>{
       BridgeProtocol.kType: BridgeProtocol.tHello,
       BridgeProtocol.kVersion: BridgeProtocol.version,
-      BridgeProtocol.kToken: token,
+      // 拨号模式下这是给手机校验的令牌；监听模式下手机不需要它（凭据方向相反）。
+      BridgeProtocol.kToken: isListening ? '' : token,
       BridgeProtocol.kClient: 'desktop',
+      BridgeProtocol.kClientName: _clientName(),
     });
     _setPhase(BridgeConnectionPhase.authenticating);
 
     try {
-      final device = await handshake.future.timeout(
-        BridgeProtocol.handshakeTimeout,
-      );
-      _device = device;
-      _reconnectAttempt = 0;
-      _setPhase(BridgeConnectionPhase.connected);
-      _startHeartbeat();
-      return device;
+      return await handshake.future.timeout(BridgeProtocol.handshakeTimeout);
     } on TimeoutException {
-      _lastError = '握手超时，手机端未响应 welcome 帧。';
-      await _teardownSocket();
-      _setPhase(BridgeConnectionPhase.disconnected);
-      throw BridgeException(BridgeProtocol.errTimeout, _lastError!);
+      throw const BridgeException(
+        BridgeProtocol.errTimeout,
+        '握手超时，手机端未响应 welcome 帧。',
+      );
     }
   }
+
+  /// 电脑主机名，手机上用来显示"已连接到谁"。取不到时留空。
+  static String _clientName() {
+    try {
+      return Platform.localHostname;
+    } on Object catch (_) {
+      return '';
+    }
+  }
+
+  // ------------------------------------------------------------ 公开操作
 
   /// 主动断开（不会自动重连）。
   Future<void> disconnect() async {
@@ -295,10 +415,130 @@ class RemoteBridgeClient {
             sdk: 0,
             appVersion: '',
           );
+
+    // 监听模式下，welcome 是**手机出示凭据的地方**（§7.3）——校验不通过就在这里
+    // 结束：回一个 reject，然后抛出异常让 _connectByListening 继续等下一条。
+    if (isListening) {
+      final rejection = _validate(frame, device);
+      if (rejection != null) {
+        // 先把 reject 发出去并 flush，再关 socket——直接 destroy 会把还没
+        // 落到内核缓冲区的帧一起丢掉，手机侧就只会看到"连不上"而看不到原因。
+        unawaited(_rejectAndDrop(rejection));
+        return;
+      }
+    }
+
     final handshake = _handshake;
     if (handshake != null && !handshake.isCompleted) {
       handshake.complete(device);
     }
+  }
+
+  /// 把 [rejection] 回给手机（并确保真的发出去），然后结束本次握手。
+  Future<void> _rejectAndDrop(Map<String, Object?> rejection) async {
+    final socket = _socket;
+    if (socket != null) {
+      try {
+        socket.write('${jsonEncode(rejection)}\n');
+        await socket.flush();
+      } on Object catch (error) {
+        debugPrint('[desktop-bridge] 回写 reject 失败：$error');
+      }
+    }
+
+    final handshake = _handshake;
+    if (handshake != null && !handshake.isCompleted) {
+      handshake.completeError(
+        BridgeException(
+          rejection[BridgeProtocol.kCode] as String? ?? BridgeProtocol.errCode,
+          rejection[BridgeProtocol.kMessage] as String? ?? '校验未通过。',
+        ),
+      );
+    }
+    await _teardownSocket();
+  }
+
+  /// 校验手机出示的凭据。
+  ///
+  /// @return 需要回给手机的 `reject` 帧；通过时返回 null。
+  Map<String, Object?>? _validate(Map<String, dynamic> frame, BridgeDeviceInfo device) {
+    final codes = pairingCode!;
+    final store = phoneStore!;
+    final deviceId = device.deviceId ?? '';
+    final sourceIp = _socket?.remoteAddress.address ?? 'unknown';
+
+    // 路径一：会话令牌。**不受限速与节流影响**（§9.2）——令牌是 128 bit 随机值，
+    // 不存在被枚举的风险；而如果把它一起限速，攻击者触发一次全局暂停就能让
+    // 已经配对过的手机也连不上，与"无需再输码即可自动重连"直接冲突。
+    final submittedToken = frame[BridgeProtocol.kToken];
+    if (submittedToken is String && submittedToken.isNotEmpty) {
+      final paired = deviceId.isEmpty ? null : store.findByDeviceId(deviceId);
+      if (paired != null && paired.token == submittedToken) {
+        codes.resetAfterSuccess();
+        unawaited(store.touch(paired.deviceId));
+        debugPrint('[desktop-bridge] 会话令牌校验通过：${paired.name}');
+        return null;
+      }
+      return _rejectFrame(
+        BridgeProtocol.errCode,
+        '会话令牌已失效，请在手机上重新配对。',
+      );
+    }
+
+    // 路径二：6 位校验码。
+    final submittedCode = frame[BridgeProtocol.kCode];
+    final outcome = codes.check(
+      submittedCode is String ? submittedCode : null,
+      sourceIp: sourceIp,
+    );
+
+    switch (outcome) {
+      case CodeAttemptOutcome.accepted:
+        codes.resetAfterSuccess();
+        // 校验通过 → 签发会话令牌并下发（§8.3）。手机收到后落盘，
+        // 之后的重连就走上面那条令牌路径。
+        final issued = store.issueSessionToken();
+        unawaited(
+          store.save(
+            deviceId: deviceId,
+            name: device.model,
+            token: issued,
+          ),
+        );
+        _send(<String, Object?>{
+          BridgeProtocol.kType: BridgeProtocol.tToken,
+          BridgeProtocol.kToken: issued,
+        });
+        debugPrint('[desktop-bridge] 校验码通过，已签发会话令牌');
+        return null;
+
+      case CodeAttemptOutcome.stale:
+        return _rejectFrame(
+          BridgeProtocol.errCodeStale,
+          '校验码刚刚刷新，请输入屏幕上新的 6 位数字。',
+        );
+
+      case CodeAttemptOutcome.locked:
+        return _rejectFrame(
+          BridgeProtocol.errLocked,
+          codes.isPaused
+              ? '电脑已暂停校验，请稍后再试。'
+              : '尝试次数过多，请稍后再试。',
+        );
+
+      case CodeAttemptOutcome.wrong:
+      case CodeAttemptOutcome.empty:
+        return _rejectFrame(BridgeProtocol.errCode, '校验码不正确。');
+    }
+  }
+
+  Map<String, Object?> _rejectFrame(String code, String message) {
+    debugPrint('[desktop-bridge] 拒绝手机：$code / $message');
+    return <String, Object?>{
+      BridgeProtocol.kType: BridgeProtocol.tReject,
+      BridgeProtocol.kCode: code,
+      BridgeProtocol.kMessage: message,
+    };
   }
 
   void _onReject(Map<String, dynamic> frame) {
@@ -385,6 +625,7 @@ class RemoteBridgeClient {
         return;
       }
       if (_phase == BridgeConnectionPhase.connecting ||
+          _phase == BridgeConnectionPhase.waiting ||
           _phase == BridgeConnectionPhase.authenticating ||
           _phase == BridgeConnectionPhase.connected) {
         return;

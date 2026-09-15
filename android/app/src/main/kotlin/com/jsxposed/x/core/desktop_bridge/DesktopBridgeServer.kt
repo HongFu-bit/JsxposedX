@@ -1,8 +1,6 @@
 package com.jsxposed.x.core.desktop_bridge
 
 import android.content.Context
-import android.net.LocalServerSocket
-import android.net.LocalSocket
 import android.os.Build
 import android.util.Base64
 import com.jsxposed.x.core.utils.log.LogX
@@ -23,18 +21,38 @@ import kotlin.concurrent.thread
 /**
  * 桌面端 bridge 服务端。
  *
- * 职责：监听抽象命名空间 socket → 校验令牌 → 收发 NDJSON 帧 → 把调用交给 [BridgeChannelRouter]。
+ * 职责：从 [BridgeTransport] 取得连接 → 校验凭据 → 收发 NDJSON 帧 → 把调用交给 [BridgeChannelRouter]。
  * 只允许一个桌面客户端同时连接（第二个连接收到 reject(busy)）。
  *
  * 线程模型：
- * - accept / 读帧：独立守护线程
+ * - 每个 transport 一条独立的 accept 线程（USB 是等待入站，LAN 是主动拨号，见 [BridgeTransport]）
  * - Pigeon 派发与回包：走 Flutter 主线程（[BridgeChannelRouter] 内部处理）
  * - 写帧：单线程 executor，避免大载荷回包阻塞 UI 线程
+ *
+ * 本类**不关心连接是 USB 来的还是 Wi-Fi 来的**——那是 transport 的职责。
+ * 两条链路共用同一个实例，因此单客户端约束、心跳、空闲超时、Pigeon 派发线程模型
+ * 全部只有一份实现。见 docs/desktop_bridge_lan_CN.md §5、§6。
  */
 internal class DesktopBridgeServer(
     context: Context,
     private val router: BridgeChannelRouter,
     private val tokenStore: DesktopBridgeTokenStore,
+    /**
+     * LAN 链路上**手机要出示的凭据**（§7.3）。
+     *
+     * 与 USB 相反的方向：USB 由电脑出示令牌、手机校验；LAN 由手机出示码/令牌、电脑校验。
+     * USB 链路上这个 lambda 的返回值不会被用到，返回 null 即可。
+     */
+    private val credentialProvider: () -> BridgeCredential? = { null },
+    /** 本机稳定标识，写进 `welcome.deviceId`，供电脑端给配对记录去重（§10.6）。 */
+    private val deviceIdProvider: () -> String = { "" },
+    /**
+     * 收到电脑下发的会话令牌时回调（§8.3）。
+     *
+     * 由 [DesktopBridgeManager] 负责落盘——服务器本身不碰存储，
+     * 这样"哪台电脑、什么名字"这类信息由掌握拨号目标的那个组件补齐。
+     */
+    private val onSessionTokenReceived: (token: String, clientName: String?) -> Unit = { _, _ -> },
 ) {
 
     private companion object {
@@ -54,30 +72,79 @@ internal class DesktopBridgeServer(
     @Volatile
     private var lastFrameAt = 0L
 
+    /** 当前客户端。USB 与 LAN 共用这一个槽位。 */
     @Volatile
-    private var client: LocalSocket? = null
+    private var client: BridgeConnection? = null
+
+    /** 当前客户端是从哪种 transport 来的，用于"换拨号目标时断开旧连接"。 */
+    @Volatile
+    private var clientKind: String? = null
 
     @Volatile
     private var clientWriter: BufferedWriter? = null
 
-    private var serverSocket: LocalServerSocket? = null
-    private var acceptThread: Thread? = null
+    /** 本次握手收到的电脑主机名，配对成功后写进 PairedPcStore。 */
+    @Volatile
+    private var lastClientName: String? = null
+
+    /**
+     * LAN 链路最近一次被电脑拒绝的原因（`code` / `code-stale` / `locked`）。
+     *
+     * 手机端页面通过 Pigeon 轮询读取，用来显示准确文案（§9.3）。
+     * 用状态而不是回调，是为了避免给 [DesktopBridgeServer] 再加一个监听者接口。
+     */
+    @Volatile
+    var lastRejectCode: String? = null
+        private set
+
+    @Volatile
+    var lastRejectMessage: String? = null
+        private set
+
+    fun clearLastReject() {
+        lastRejectCode = null
+        lastRejectMessage = null
+    }
+
+    private val transports = mutableListOf<BridgeTransport>()
+    private val acceptThreads = mutableMapOf<String, Thread>()
     private var scheduler: ScheduledExecutorService? = null
     private var writeExecutor: ExecutorService? = null
 
     fun isRunning(): Boolean = running
 
+    /**
+     * 当前是否已有客户端连着。
+     *
+     * 给 [LanDialTransport] 的 `canDial` 谓词用：已有连接时不要拨号，
+     * 否则会出现"手机主动连上去、又被自己的单客户端约束以 busy 拒掉"的怪状态
+     * （docs/desktop_bridge_lan_CN.md §6.4 第二点）。
+     */
+    fun hasClient(): Boolean = client != null
+
+    /** 当前客户端来自哪种 transport；没有客户端时返回 null。 */
+    fun currentClientKind(): String? = clientKind
+
     fun start() {
         if (running) {
             return
         }
-        try {
-            serverSocket = LocalServerSocket(BridgeProtocol.SOCKET_NAME)
-        } catch (t: Throwable) {
-            LogX.e(TAG, "bind socket failed:", BridgeProtocol.SOCKET_NAME, t)
+
+        val started = mutableListOf<BridgeTransport>()
+        for (transport in createTransports()) {
+            try {
+                transport.start()
+                started += transport
+            } catch (t: Throwable) {
+                LogX.e(TAG, "start transport failed:", transport.kind, t)
+            }
+        }
+        if (started.isEmpty()) {
+            LogX.e(TAG, "no transport could be started, bridge stays disabled")
             return
         }
 
+        transports.addAll(started)
         running = true
         writeExecutor = Executors.newSingleThreadExecutor()
         scheduler = Executors.newSingleThreadScheduledExecutor().also { executor ->
@@ -88,12 +155,28 @@ internal class DesktopBridgeServer(
                 TimeUnit.MILLISECONDS,
             )
         }
-        acceptThread = thread(isDaemon = true, name = "jsxposed-bridge-accept") { acceptLoop() }
+        for (transport in started) {
+            acceptThreads[transport.kind] = thread(
+                isDaemon = true,
+                name = "jsxposed-bridge-accept-${transport.kind}",
+            ) {
+                acceptLoop(transport)
+            }
+        }
 
-        LogX.i(TAG, "listening on abstract socket:", BridgeProtocol.SOCKET_NAME)
         // token 通过 logcat 暴露给 adb 侧，启动脚本会读取这一行。
         LogX.i(TAG, "token=${tokenStore.token()}")
     }
+
+    /**
+     * 本次要启用的 transport。
+     *
+     * P0-1 只有 USB——这一步是把传输层抽出来的等价重构，行为必须与重构前完全一致。
+     * LAN 拨号 transport 在后续步骤里加到这里。
+     */
+    private fun createTransports(): List<BridgeTransport> = listOf(
+        UsbLocalTransport(BridgeProtocol.SOCKET_NAME),
+    )
 
     fun stop() {
         if (!running) {
@@ -106,30 +189,88 @@ internal class DesktopBridgeServer(
         writeExecutor?.shutdownNow()
         writeExecutor = null
 
-        closeQuietly(serverSocket)
-        serverSocket = null
+        // 先关 transport 让阻塞中的 accept 返回，再关客户端。
+        for (transport in transports) {
+            transport.close()
+        }
+        transports.clear()
+        acceptThreads.clear()
 
         val current = client
         client = null
+        clientKind = null
         clientWriter = null
         closeQuietly(current)
 
-        acceptThread = null
         LogX.i(TAG, "stopped")
+    }
+
+    // ------------------------------------------------- 运行期增删 transport
+
+    /**
+     * 运行期加一条 transport（LAN 拨号用）。
+     *
+     * 同一时刻只允许一个 LAN 拨号目标：换目标时调用方应先 [removeTransport] 掉旧那条，
+     * 再调本方法。这里额外做一次同 kind 清理，是为了防止调用方漏掉那一步
+     * 而留下两条同时在拨号的 transport（文档 §6.4 第一点）。
+     */
+    @Synchronized
+    fun addTransport(transport: BridgeTransport) {
+        if (!running) {
+            LogX.w(TAG, "addTransport ignored, bridge is not running:", transport.kind)
+            return
+        }
+        removeTransportLocked(transport.kind)
+        try {
+            transport.start()
+        } catch (t: Throwable) {
+            LogX.e(TAG, "start transport failed:", transport.kind, t)
+            return
+        }
+        transports += transport
+        acceptThreads[transport.kind] = thread(
+            isDaemon = true,
+            name = "jsxposed-bridge-accept-${transport.kind}",
+        ) {
+            acceptLoop(transport)
+        }
+    }
+
+    /** 关掉并移除指定类型的 transport；若当前客户端来自它，一并断开。 */
+    @Synchronized
+    fun removeTransport(kind: String) {
+        removeTransportLocked(kind)
+    }
+
+    private fun removeTransportLocked(kind: String) {
+        val target = transports.firstOrNull { it.kind == kind } ?: return
+        transports.remove(target)
+        acceptThreads.remove(kind)
+        // close() 会让阻塞在 accept() 里的那条线程尽快返回 null 并退出。
+        target.close()
+
+        if (clientKind == kind) {
+            val current = client
+            client = null
+            clientKind = null
+            clientWriter = null
+            closeQuietly(current)
+            LogX.i(TAG, "client dropped because its transport was removed:", kind)
+        }
     }
 
     // ---------------------------------------------------------------- accept
 
-    private fun acceptLoop() {
+    private fun acceptLoop(transport: BridgeTransport) {
         while (running) {
-            val accepted = try {
-                serverSocket?.accept()
-            } catch (t: Throwable) {
-                if (running) {
-                    LogX.e(TAG, "accept failed:", t)
-                }
-                null
-            } ?: break
+            // accept() 返回 null 即结束循环——这与重构前的行为一致
+            // （重构前也是 accept 失败就 break）。
+            //
+            // 重试/退避**不属于本层的职责**：USB 侧一次失败就是失败；
+            // LAN 拨号侧需要反复重试，由 LanDialTransport 在它自己的 accept()
+            // 内部完成退避循环，只在"该 transport 已关闭"时才返回 null。
+            // 这样两端都不会出现"在 Server 里空转重试"的忙等。
+            val accepted = transport.accept() ?: break
 
             if (client != null) {
                 LogX.w(TAG, "reject extra client: busy")
@@ -137,27 +278,32 @@ internal class DesktopBridgeServer(
                 continue
             }
 
-            handleClient(accepted)
+            handleClient(accepted, transport.kind)
         }
     }
 
-    private fun handleClient(socket: LocalSocket) {
+    /**
+     * @param transportKind [BridgeProtocol.TRANSPORT_USB] 或 [BridgeProtocol.TRANSPORT_LAN]。
+     *   握手与欢迎帧都要按它分支——两条链路的**凭据方向是相反的**（§7.3）。
+     */
+    private fun handleClient(connection: BridgeConnection, transportKind: String) {
         try {
-            val reader = BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8))
-            val writer = BufferedWriter(OutputStreamWriter(socket.outputStream, Charsets.UTF_8))
+            val reader = BufferedReader(InputStreamReader(connection.input, Charsets.UTF_8))
+            val writer = BufferedWriter(OutputStreamWriter(connection.output, Charsets.UTF_8))
 
             synchronized(writeLock) {
-                client = socket
+                client = connection
+                clientKind = transportKind
                 clientWriter = writer
             }
             lastFrameAt = System.currentTimeMillis()
 
-            if (!performHandshake(reader)) {
+            if (!performHandshake(transportKind, reader)) {
                 return
             }
 
-            LogX.i(TAG, "desktop client connected")
-            readLoop(reader)
+            LogX.i(TAG, "desktop client connected:", connection.remoteLabel, transportKind)
+            readLoop(reader, transportKind)
         } catch (t: Throwable) {
             if (running) {
                 LogX.w(TAG, "client loop ended:", "${t.message}")
@@ -165,15 +311,16 @@ internal class DesktopBridgeServer(
         } finally {
             synchronized(writeLock) {
                 client = null
+                clientKind = null
                 clientWriter = null
             }
-            closeQuietly(socket)
+            connection.close()
             LogX.i(TAG, "desktop client disconnected")
         }
     }
 
     /** @return 握手是否通过。 */
-    private fun performHandshake(reader: BufferedReader): Boolean {
+    private fun performHandshake(transportKind: String, reader: BufferedReader): Boolean {
         val line = reader.readLine() ?: return false
         lastFrameAt = System.currentTimeMillis()
 
@@ -197,7 +344,17 @@ internal class DesktopBridgeServer(
             )
             return false
         }
-        if (requireToken) {
+
+        // 电脑主机名，配对成功后写进 PairedPcStore，手机端用来显示"已连接到谁"。
+        lastClientName = hello.optString(BridgeProtocol.K_CLIENT_NAME).takeIf { it.isNotBlank() }
+
+        // 两条链路的**校验方向相反**（§7.3）：
+        //
+        // - USB：可信信道是 adb，由电脑出示令牌、手机校验 —— 今天的行为，一字不改。
+        // - LAN：可信信道是电脑屏幕上的 6 位码，由手机出示、**电脑校验**。
+        //   所以这一侧刻意不做任何本地校验，只把凭据原样附进 welcome，让电脑去判。
+        //   这样做的理由见 §7.2：电脑是监听端，必须自己校验对端，不能依赖对端自证。
+        if (transportKind == BridgeProtocol.TRANSPORT_USB && requireToken) {
             val expected = tokenStore.token()
             val provided = hello.optString(BridgeProtocol.K_TOKEN)
             if (!expected.equals(provided, ignoreCase = true)) {
@@ -212,13 +369,13 @@ internal class DesktopBridgeServer(
             }
         }
 
-        writeFrame(welcomeFrame())
+        writeFrame(welcomeFrame(transportKind))
         return true
     }
 
     // ------------------------------------------------------------- 读帧循环
 
-    private fun readLoop(reader: BufferedReader) {
+    private fun readLoop(reader: BufferedReader, transportKind: String) {
         while (running) {
             val line = try {
                 reader.readLine()
@@ -258,6 +415,11 @@ internal class DesktopBridgeServer(
                         .put(BridgeProtocol.K_TYPE, BridgeProtocol.T_PONG)
                         .put(BridgeProtocol.K_ID, frame.optLong(BridgeProtocol.K_ID))
                 )
+                // 这两个是 LAN 链路新增的、由电脑发来的帧，**必须显式处理**：
+                // readLoop 对未知帧类型只记日志并继续，漏掉会静默失效，表现为
+                // "配对成功了但下次还要重新输入校验码"或"看不到被拒的原因"。
+                BridgeProtocol.T_TOKEN -> onSessionToken(frame, transportKind)
+                BridgeProtocol.T_REJECT -> onPeerReject(frame)
                 else -> LogX.w(TAG, "unknown frame type:", frame.optString(BridgeProtocol.K_TYPE))
             }
         }
@@ -289,8 +451,43 @@ internal class DesktopBridgeServer(
         }
     }
 
-    private fun decodePayload(frame: JSONObject): ByteArray? {
-        if (frame.isNull(BridgeProtocol.K_PAYLOAD)) {
+    /**
+     * 电脑在校验通过后下发的会话令牌（§8.3）。
+     *
+     * 收到即视为"配对成功"，交给 [onSessionTokenReceived] 落盘，
+     * 之后的重连就走 [BridgeCredential.Session] 这条路径，不再需要用户输码。
+     */
+    private fun onSessionToken(frame: JSONObject, transportKind: String) {
+        if (transportKind != BridgeProtocol.TRANSPORT_LAN) {
+            // USB 链路的令牌方向相反（由电脑出示、手机校验），这里收到的 token 帧没有意义。
+            LogX.w(TAG, "unexpected token frame on usb transport, ignored")
+            return
+        }
+        val token = frame.optString(BridgeProtocol.K_TOKEN)
+        if (token.isBlank()) {
+            LogX.w(TAG, "empty session token, ignored")
+            return
+        }
+        LogX.i(TAG, "session token issued by desktop, paired")
+        clearLastReject()
+        onSessionTokenReceived(token, lastClientName)
+    }
+
+    /**
+     * 电脑发来的 reject（LAN 链路上由它发出，见 §8.4 的方向规则）。
+     *
+     * 只记录原因供页面显示，**不在这里决定重试策略**——`code` 要停下来等用户重新输码，
+     * 而 `code-stale` / `locked` / `busy` 应当继续退避重试，这个判断属于拨号那一侧。
+     */
+    private fun onPeerReject(frame: JSONObject) {
+        val code = frame.optString(BridgeProtocol.K_CODE)
+        val message = frame.optString(BridgeProtocol.K_MESSAGE)
+        lastRejectCode = code.takeIf { it.isNotBlank() }
+        lastRejectMessage = message.takeIf { it.isNotBlank() }
+        LogX.w(TAG, "rejected by desktop:", code, message)
+    }
+
+    private fun decodePayload(frame: JSONObject): ByteArray? {        if (frame.isNull(BridgeProtocol.K_PAYLOAD)) {
             return null
         }
         val encoded = frame.optString(BridgeProtocol.K_PAYLOAD)
@@ -307,7 +504,7 @@ internal class DesktopBridgeServer(
 
     // -------------------------------------------------------------- 帧构造
 
-    private fun welcomeFrame(): JSONObject {
+    private fun welcomeFrame(transportKind: String): JSONObject {
         val device = JSONObject()
             .put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
             .put("android", Build.VERSION.RELEASE)
@@ -318,11 +515,28 @@ internal class DesktopBridgeServer(
             .put("prefixes", JSONArray().put(BridgeProtocol.CHANNEL_PREFIX))
             .put("maxFrameBytes", BridgeProtocol.MAX_FRAME_CHARS)
 
-        return JSONObject()
+        val frame = JSONObject()
             .put(BridgeProtocol.K_TYPE, BridgeProtocol.T_WELCOME)
             .put(BridgeProtocol.K_VERSION, BridgeProtocol.VERSION)
             .put(BridgeProtocol.K_DEVICE, device)
             .put(BridgeProtocol.K_CAPS, caps)
+            .put(BridgeProtocol.K_TRANSPORT, transportKind)
+
+        if (transportKind == BridgeProtocol.TRANSPORT_LAN) {
+            frame.put(BridgeProtocol.K_DEVICE_ID, deviceIdProvider())
+
+            // LAN 链路要由**手机**出示凭据（§7.3）；USB 链路不带这两个字段，
+            // 因为那条链路上是电脑出示令牌、手机校验。
+            when (val credential = credentialProvider()) {
+                is BridgeCredential.Code -> frame.put(BridgeProtocol.K_CODE, credential.value)
+                is BridgeCredential.Session -> frame.put(BridgeProtocol.K_TOKEN, credential.value)
+                // 没有凭据时什么都不放：电脑会按 §7.4 回 reject(code)，
+                // 这正是"手机还没拿到码就抢先拨号"时应有的结果。
+                null -> Unit
+            }
+        }
+
+        return frame
     }
 
     private fun rejectFrame(code: String, message: String): JSONObject =
@@ -371,16 +585,16 @@ internal class DesktopBridgeServer(
     }
 
     /** 握手阶段拒绝额外连接时，客户端 writer 还没登记，只能单独写一次。 */
-    private fun sendOneShotReject(socket: LocalSocket, code: String, message: String) {
+    private fun sendOneShotReject(connection: BridgeConnection, code: String, message: String) {
         try {
-            val writer = BufferedWriter(OutputStreamWriter(socket.outputStream, Charsets.UTF_8))
+            val writer = BufferedWriter(OutputStreamWriter(connection.output, Charsets.UTF_8))
             writer.write(rejectFrame(code, message).toString())
             writer.write("\n")
             writer.flush()
         } catch (t: Throwable) {
             LogX.w(TAG, "send reject failed:", "${t.message}")
         } finally {
-            closeQuietly(socket)
+            connection.close()
         }
     }
 
@@ -403,17 +617,9 @@ internal class DesktopBridgeServer(
         }
     }
 
-    private fun closeQuietly(socket: LocalSocket?) {
+    private fun closeQuietly(connection: BridgeConnection?) {
         try {
-            socket?.close()
-        } catch (_: Throwable) {
-            // 忽略关闭异常
-        }
-    }
-
-    private fun closeQuietly(server: LocalServerSocket?) {
-        try {
-            server?.close()
+            connection?.close()
         } catch (_: Throwable) {
             // 忽略关闭异常
         }

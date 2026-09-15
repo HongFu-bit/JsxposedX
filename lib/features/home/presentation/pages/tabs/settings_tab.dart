@@ -13,9 +13,11 @@ import 'package:JsxposedX/features/home/presentation/widgets/settings_community_
 import 'package:JsxposedX/features/home/presentation/widgets/settings_section.dart';
 import 'package:JsxposedX/features/home/presentation/widgets/settings_tile.dart';
 import 'package:JsxposedX/features/home/presentation/widgets/theme_color_picker.dart';
+import 'package:JsxposedX/core/routes/routes/home_route.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+import 'package:go_router/go_router.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 const String _forumHost = 'muxue.pro';
@@ -159,6 +161,22 @@ class SettingsTab extends HookConsumerWidget {
                 icon: Icons.qr_code_rounded,
                 title: context.isZh ? '微信公众号' : 'WeChat Channel',
                 onTap: () => _showWechatDialog(context),
+              ),
+            ],
+          ),
+        ),
+        SliverToBoxAdapter(child: SizedBox(height: 20.h)),
+        SliverToBoxAdapter(
+          child: SettingsSection(
+            title: context.isZh ? '桌面连接' : 'Desktop connection',
+            items: [
+              SettingsTile(
+                icon: Icons.wifi_tethering_rounded,
+                title: context.isZh ? '局域网直连' : 'Wi-Fi direct',
+                subtitle: context.isZh
+                    ? '不插线，在电脑上操作；需要同一 Wi-Fi'
+                    : 'Use the desktop app without a cable',
+                onTap: () => context.push(HomeRoute.lanBridge),
               ),
             ],
           ),

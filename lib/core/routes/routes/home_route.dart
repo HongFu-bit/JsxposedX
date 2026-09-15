@@ -1,5 +1,7 @@
 import 'package:JsxposedX/common/pages/splash_page.dart';
 import 'package:JsxposedX/core/models/app_info.dart';
+import 'package:JsxposedX/desktop/ui/desktop_memory_tool_page.dart';
+import 'package:JsxposedX/features/desktop_bridge/presentation/pages/lan_bridge_page.dart';
 import 'package:JsxposedX/features/ai/presentation/pages/ai_reverse_page.dart';
 import 'package:JsxposedX/features/home/presentation/pages/tabs/repository_tab/pages/script_detail_page.dart';
 import 'package:JsxposedX/features/so_analysis/presentation/pages/so_analysis_page.dart';
@@ -38,6 +40,10 @@ class HomeRoute {
   static const aiApiManual = '/aiApiManual/:apiType';
   static const fridaApiManual = '/fridaApiManual';
   static const soAnalysis = '/soAnalysis/:packageName';
+  static const memoryTool = '/memoryTool';
+
+  /// 手机端「局域网直连」页（电脑端不走这个路由，它有自己的连接页）。
+  static const lanBridge = '/lanBridge';
   static const scriptDetail = '/scriptDetail/:id';
   static const login = 'login';
 
@@ -71,6 +77,12 @@ class HomeRoute {
       '/soAnalysis/$packageName';
 
   static String toScriptDetail({required int id}) => '/scriptDetail/$id';
+
+  /// 桌面端内存工具页（手机端是悬浮窗，不走这个路由）。
+  static String toMemoryTool() => memoryTool;
+
+  /// 手机端「局域网直连」页。
+  static String toLanBridge() => lanBridge;
 }
 
 List<GoRoute> homeRoutes = [
@@ -178,5 +190,13 @@ List<GoRoute> homeRoutes = [
       final id = state.pathParameters["id"]!;
       return ScriptDetailPage(id: int.tryParse(id) ?? -1);
     },
+  ),
+  GoRoute(
+    path: HomeRoute.memoryTool,
+    builder: (context, state) => const DesktopMemoryToolPage(),
+  ),
+  GoRoute(
+    path: HomeRoute.lanBridge,
+    builder: (context, state) => const LanBridgePage(),
   ),
 ];

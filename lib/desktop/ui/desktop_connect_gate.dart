@@ -1,10 +1,17 @@
+import 'dart:async';
+
 import 'package:JsxposedX/common/widgets/app_bootstrap.dart';
 import 'package:JsxposedX/core/themes/app_colors.dart';
 import 'package:JsxposedX/core/themes/app_theme.dart';
 import 'package:JsxposedX/desktop/bridge/adb_helper.dart';
 import 'package:JsxposedX/desktop/bridge/bridge_protocol.dart';
+import 'package:JsxposedX/desktop/bridge/lan_bridge_controller.dart';
 import 'package:JsxposedX/desktop/bridge/remote_bridge_client.dart';
+import 'package:JsxposedX/desktop/ui/desktop_code_panel.dart';
 import 'package:flutter/material.dart';
+
+/// 连接页上的两种模式。
+enum _ConnectMode { usb, wifi }
 
 /// 桌面端启动时的连接界面。
 ///
@@ -23,6 +30,7 @@ class DesktopConnectGate extends StatefulWidget {
     required this.initialToken,
     required this.onConnect,
     this.autoConnect = false,
+    this.lanController,
   });
 
   final int initialPort;
@@ -34,6 +42,10 @@ class DesktopConnectGate extends StatefulWidget {
 
   /// 启动时自动尝试连接一次（脚本已注入端口与令牌时使用）。
   final bool autoConnect;
+
+  /// Wi-Fi 直连的控制器。为 null 时只显示 USB 那一档
+  /// （例如从 `-SkipLaunch` 之类只有 USB 参数的入口进来时）。
+  final LanBridgeController? lanController;
 
   @override
   State<DesktopConnectGate> createState() => _DesktopConnectGateState();
@@ -51,6 +63,12 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
   String? _errorHint;
   bool _showManual = false;
 
+  /// 当前显示哪一档。默认 USB，保持改动前的行为不变。
+  _ConnectMode _mode = _ConnectMode.usb;
+
+  LanSnapshot? _lanSnapshot;
+  StreamSubscription<LanSnapshot>? _lanSubscription;
+
   @override
   void initState() {
     super.initState();
@@ -60,6 +78,16 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
     _tokenController = TextEditingController(text: widget.initialToken);
     _showManual = widget.initialToken.isNotEmpty;
 
+    final lan = widget.lanController;
+    if (lan != null) {
+      _lanSnapshot = lan.snapshot;
+      _lanSubscription = lan.stream.listen((snapshot) {
+        if (mounted) {
+          setState(() => _lanSnapshot = snapshot);
+        }
+      });
+    }
+
     if (widget.autoConnect) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _connectViaAdb());
     }
@@ -67,6 +95,7 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
 
   @override
   void dispose() {
+    unawaited(_lanSubscription?.cancel());
     _portController.dispose();
     _tokenController.dispose();
     super.dispose();
@@ -315,6 +344,7 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
 
   @override
   Widget build(BuildContext context) {
+    final lan = widget.lanController;
     return MaterialApp(
       title: 'JsxposedX Desktop',
       debugShowCheckedModeBanner: false,
@@ -327,24 +357,199 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
           child: SingleChildScrollView(
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
+              constraints: const BoxConstraints(maxWidth: 460),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
                   _wordmark(context),
-                  const SizedBox(height: 28),
-                  _connectButton(),
-                  const SizedBox(height: 18),
-                  _statusArea(context),
-                  const SizedBox(height: 22),
-                  _manualSection(context),
+                  const SizedBox(height: 20),
+                  if (lan != null) ...<Widget>[
+                    _modeSwitcher(),
+                    const SizedBox(height: 20),
+                  ],
+                  if (lan == null || _mode == _ConnectMode.usb)
+                    ..._usbPane(context)
+                  else
+                    ..._lanPane(context, lan),
                 ],
               ),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  /// USB 那一档的内容——与改造前逐字一致，一行没动。
+  List<Widget> _usbPane(BuildContext context) => <Widget>[
+        _connectButton(),
+        const SizedBox(height: 18),
+        _statusArea(context),
+        const SizedBox(height: 22),
+        _manualSection(context),
+      ];
+
+  Widget _modeSwitcher() {
+    return SegmentedButton<_ConnectMode>(
+      segments: const <ButtonSegment<_ConnectMode>>[
+        ButtonSegment<_ConnectMode>(
+          value: _ConnectMode.usb,
+          icon: Icon(Icons.usb_rounded, size: 16),
+          label: Text('USB 连接'),
+        ),
+        ButtonSegment<_ConnectMode>(
+          value: _ConnectMode.wifi,
+          icon: Icon(Icons.wifi_tethering_rounded, size: 16),
+          label: Text('Wi-Fi 直连'),
+        ),
+      ],
+      selected: <_ConnectMode>{_mode},
+      showSelectedIcon: false,
+      style: const ButtonStyle(
+        visualDensity: VisualDensity.compact,
+        textStyle: WidgetStatePropertyAll<TextStyle>(TextStyle(fontSize: 12.5)),
+      ),
+      onSelectionChanged: (selection) {
+        final next = selection.first;
+        if (next == _mode) {
+          return;
+        }
+        setState(() => _mode = next);
+        // 切走时把等待停掉：电脑只在"等待连接"期间监听，
+        // 让用户在别的页面上还开着端口是不必要的暴露（§7.5）。
+        if (next == _ConnectMode.usb) {
+          unawaited(widget.lanController?.stopWaiting());
+        }
+      },
+    );
+  }
+
+  // ------------------------------------------------------------ Wi-Fi 直连
+
+  List<Widget> _lanPane(BuildContext context, LanBridgeController lan) {
+    final snapshot = _lanSnapshot ?? lan.snapshot;
+
+    if (snapshot.phase == LanPhase.idle || snapshot.phase == LanPhase.failed) {
+      return <Widget>[
+        _lanIntro(context, snapshot),
+        const SizedBox(height: 18),
+        FilledButton(
+          onPressed: () => unawaited(lan.startWaiting()),
+          style: FilledButton.styleFrom(
+            minimumSize: const Size.fromHeight(46),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+          child: Text(_t('开始等待手机连接', 'Start waiting for the phone')),
+        ),
+        const SizedBox(height: 22),
+        _pairedPhones(context, lan, snapshot),
+      ];
+    }
+
+    return <Widget>[
+      DesktopCodePanel(
+        lanAddress: snapshot.address,
+        listenPort: snapshot.listenPort,
+        availableAddresses: snapshot.addresses,
+        onSelectAddress: (address) => unawaited(lan.selectAddress(address)),
+        pairingCode: lan.pairingCode,
+        rotationRemaining: snapshot.rotationRemaining,
+        pauseRemaining: snapshot.pauseRemaining,
+        connectionLabel: snapshot.isConnected
+            ? '已连接：${snapshot.device?.model ?? '手机'}'
+            : null,
+        pairedPhoneCount: snapshot.pairedCount,
+        onDisconnect: () => unawaited(lan.stopWaiting()),
+        errorText: snapshot.error,
+      ),
+      const SizedBox(height: 14),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton(
+          onPressed: () => unawaited(lan.stopWaiting()),
+          child: Text(_t('停止等待', 'Stop waiting')),
+        ),
+      ),
+      const SizedBox(height: 10),
+      _pairedPhones(context, lan, snapshot),
+    ];
+  }
+
+  Widget _lanIntro(BuildContext context, LanSnapshot snapshot) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        const Text(
+          '电脑只在这段时间里监听端口，并把地址显示出来供你抄到手机上。'
+          '手机需要在同一 Wi-Fi（或同一热点）下。',
+          style: TextStyle(fontSize: 13, height: 1.5, color: AppColors.textSecondary),
+        ),
+        if (snapshot.phase == LanPhase.failed && snapshot.error != null) ...<Widget>[
+          const SizedBox(height: 12),
+          _statusLine(
+            icon: Icons.error_outline,
+            color: Theme.of(context).colorScheme.error,
+            text: snapshot.error!,
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _pairedPhones(
+    BuildContext context,
+    LanBridgeController lan,
+    LanSnapshot snapshot,
+  ) {
+    final phones = lan.phoneStore.phones;
+    if (phones.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        const Text(
+          '已配对的手机',
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          '这些手机会用保存的会话令牌自动重连，不再需要输入校验码；'
+          '移除某一条就等于吊销它的令牌。',
+          style: TextStyle(fontSize: 12, height: 1.5, color: AppColors.textSecondary),
+        ),
+        const SizedBox(height: 8),
+        for (final phone in phones)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    phone.name,
+                    style: const TextStyle(fontSize: 13),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => unawaited(lan.removePhone(phone.deviceId)),
+                  child: Text(_t('移除', 'Remove')),
+                ),
+              ],
+            ),
+          ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: () => unawaited(lan.clearPhones()),
+            child: Text(_t('全部移除', 'Remove all')),
+          ),
+        ),
+      ],
     );
   }
 
@@ -363,10 +568,15 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
         ),
         const SizedBox(height: 6),
         Text(
-          _t(
-            '通过 USB 连接手机，界面与功能与手机端保持一致。',
-            'Connect to your phone over USB. Same features as the phone app.',
-          ),
+          widget.lanController == null
+              ? _t(
+                  '通过 USB 连接手机，界面与功能与手机端保持一致。',
+                  'Connect to your phone over USB. Same features as the phone app.',
+                )
+              : _t(
+                  '两条路可选：USB（需要 adb）或 Wi-Fi 直连（同一局域网，不需要 adb）。',
+                  'Two ways in: USB (needs adb) or Wi-Fi direct (same LAN, no adb).',
+                ),
           style: const TextStyle(
             fontSize: 13,
             height: 1.5,

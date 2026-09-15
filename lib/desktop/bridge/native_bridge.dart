@@ -2,6 +2,7 @@ import 'package:JsxposedX/desktop/bridge/remote_binary_messenger.dart';
 import 'package:JsxposedX/desktop/bridge/remote_bridge_client.dart';
 import 'package:JsxposedX/generated/apk_analysis.g.dart';
 import 'package:JsxposedX/generated/app.g.dart';
+import 'package:JsxposedX/generated/lan_bridge.g.dart';
 import 'package:JsxposedX/generated/lsposed.g.dart';
 import 'package:JsxposedX/generated/memory_tool.g.dart';
 import 'package:JsxposedX/generated/pinia.g.dart';
@@ -62,6 +63,13 @@ abstract final class NativeBridge {
   static AppNative get app => AppNative(binaryMessenger: _remote);
 
   static LSPosedNative get lsposed => LSPosedNative(binaryMessenger: _remote);
+
+  /// 「局域网直连」的状态与操作。
+  ///
+  /// 它读的是**手机侧**的 DesktopBridgeManager：桌面端连上之后，走这条通道
+  /// 能读到手机那份"已配对的电脑"列表，而不是电脑自己的（§11.1）。
+  static LanBridgeNative get lanBridge =>
+      LanBridgeNative(binaryMessenger: _remote);
 
   static MemoryToolNative get memoryTool =>
       MemoryToolNative(binaryMessenger: _remote);
