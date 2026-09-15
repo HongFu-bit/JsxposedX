@@ -29,7 +29,10 @@ import 'package:pointycastle/export.dart';
 class BridgeCipher {
   BridgeCipher._(this._sendKey, this._receiveKey);
 
-  /// 从会话令牌派生密钥。令牌是 64 个 hex 字符（32 字节）。
+  /// 从会话令牌派生密钥。
+  ///
+  /// 令牌是 hex 字符串，**电脑签发的实际是 16 字节 / 32 个字符（128 bit）**；
+  /// 这里不假设长度，只校验它是合理的偶数长度 hex（见 [_decodeHex]）。
   ///
   /// **派生完立刻做一次自检**（[_verifySelfTest]），失败会抛 [StateError]。
   /// 调用方应当把它当作致命错误：加密实现坏了的话，最好的结果是当场报错，
@@ -55,6 +58,11 @@ class BridgeCipher {
 
   static const int _nonceBytes = 12;
   static const int _tagBits = 128;
+
+  /// 会话令牌的 hex 长度范围，与手机侧 `BridgeCipher.kt` 保持一致。
+  /// 电脑签发的会话令牌实际是 **16 字节（32 个字符，128 bit）**。
+  static const int _minTokenHex = 32;
+  static const int _maxTokenHex = 128;
 
   final Uint8List _sendKey;
   final Uint8List _receiveKey;
@@ -223,15 +231,24 @@ class BridgeCipher {
     return Uint8List.fromList(block.sublist(0, 32));
   }
 
-  /// 会话令牌是 hex 字符串。长度不对时抛——那说明握手阶段出了问题，
-  /// 不该带着一个残缺的密钥继续跑。
+  /// 会话令牌是 hex 字符串。
+  ///
+  /// **长度取实际值，不假设固定长度**——这一点曾经被我写死成"必须 64 个字符"
+  /// （以为令牌是 32 字节），而电脑签发的是 **16 字节 / 32 个字符**，
+  /// 结果两端都建不出密钥，表现为"连上就断"。HKDF 的 IKM 可以是任意长度，
+  /// 这里只需要校验它是个合理偶数长度的 hex。
   static Uint8List _decodeHex(String hex) {
     final clean = hex.trim();
-    if (clean.length != 64) {
-      throw ArgumentError('会话令牌应是 64 个 hex 字符，实际 ${clean.length} 个');
+    if (clean.length < _minTokenHex ||
+        clean.length > _maxTokenHex ||
+        clean.length.isOdd) {
+      throw ArgumentError(
+        '会话令牌应是 $_minTokenHex~$_maxTokenHex 个 hex 字符（偶数），实际 ${clean.length} 个',
+      );
     }
-    final out = Uint8List(32);
-    for (var i = 0; i < 32; i++) {
+
+    final out = Uint8List(clean.length ~/ 2);
+    for (var i = 0; i < out.length; i++) {
       final byte = int.tryParse(clean.substring(i * 2, i * 2 + 2), radix: 16);
       if (byte == null) {
         throw ArgumentError('会话令牌不是合法的 hex');

@@ -171,6 +171,13 @@ internal class BridgeCipher private constructor(
         private const val TAG_BITS = 128
         private const val KEY_BYTES = 32
 
+        /**
+         * 会话令牌的 hex 长度范围，与电脑侧 `bridge_cipher.dart` 保持一致。
+         * 电脑签发的会话令牌实际是 **16 字节（32 个字符，128 bit）**。
+         */
+        private const val MIN_TOKEN_HEX = 32
+        private const val MAX_TOKEN_HEX = 128
+
         /** 认证但不加密的附加数据；它同时锁定了协议版本与算法套件。 */
         private val AAD = "JsxposedX-Bridge/v1/A256GCM".toByteArray(Charsets.UTF_8)
 
@@ -183,7 +190,9 @@ internal class BridgeCipher private constructor(
          * 调用方应当把它当作致命错误：加密实现坏了的话，最好的结果是当场报错，
          * 最坏的结果是安静地连上又断开——而那正是最难查的一种故障。
          *
-         * @throws IllegalArgumentException 令牌不是 64 个 hex 字符。
+         * @throws IllegalArgumentException 令牌不是合法的 hex，或长度不在
+         *   [MIN_TOKEN_HEX]~[MAX_TOKEN_HEX] 之间。**不要把它写成固定长度**——
+         *   电脑签发的是 16 字节 / 32 个字符。
          */
         internal fun fromSessionToken(sessionToken: String): BridgeCipher {
             val ikm = decodeHex(sessionToken)
@@ -210,13 +219,23 @@ internal class BridgeCipher private constructor(
             return mac.doFinal().copyOf(KEY_BYTES)
         }
 
+        /**
+         * 会话令牌是 hex 字符串。
+         *
+         * **长度取实际值，不假设固定长度**——这一点曾经被写死成"必须 64 个字符"
+         * （以为令牌是 32 字节），而电脑签发的是 **16 字节 / 32 个字符**，
+         * 结果两端都建不出密钥，表现为"连上就断"。HKDF 的 IKM 可以是任意长度，
+         * 这里只需要校验它是个合理偶数长度的 hex。
+         */
         private fun decodeHex(hex: String): ByteArray {
             val clean = hex.trim()
-            require(clean.length == 64) {
-                "会话令牌应是 64 个 hex 字符，实际 ${clean.length} 个"
+            require(
+                clean.length in MIN_TOKEN_HEX..MAX_TOKEN_HEX && clean.length % 2 == 0,
+            ) {
+                "会话令牌应是 $MIN_TOKEN_HEX~$MAX_TOKEN_HEX 个 hex 字符（偶数），实际 ${clean.length} 个"
             }
-            val out = ByteArray(32)
-            for (i in 0 until 32) {
+            val out = ByteArray(clean.length / 2)
+            for (i in out.indices) {
                 out[i] = clean.substring(i * 2, i * 2 + 2).toInt(16).toByte()
             }
             return out
