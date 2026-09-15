@@ -139,6 +139,15 @@ internal class DesktopBridgeServer(
     /** 当前客户端来自哪种 transport；没有客户端时返回 null。 */
     fun currentClientKind(): String? = clientKind
 
+    /**
+     * 校验是否已经通过——也就是电脑是否已经发来 `secured`、帧加密是否已启用。
+     *
+     * **判断"LAN 已连接"必须用它，不能用 [hasClient]**：`hasClient` 在 TCP 刚接上的
+     * 那一刻就为真，而那时电脑还没校验。用它做界面状态，每被拒绝一次就会先亮一下
+     * "已连接"再退回"正在连接"，用户看到的是一条一直在跳的状态，而不是"从来没连上"。
+     */
+    fun isSecured(): Boolean = cipher != null
+
     fun start() {
         if (running) {
             return
@@ -502,13 +511,17 @@ internal class DesktopBridgeServer(
             LogX.w(TAG, "收到 secured 但还没有会话令牌，断开")
             return false
         }
-        cipher = try {
+        val created = try {
             BridgeCipher.fromSessionToken(token)
         } catch (t: Throwable) {
             LogX.e(TAG, "派生加密密钥失败:", t)
             return false
         }
-        LogX.i(TAG, "frame encryption enabled")
+        cipher = created
+        // 指纹是给排错用的：电脑端也会打一行它的**发送**密钥指纹（pc2phone），
+        // 两个数字应当相同——那是同一把密钥的两个方向视角。
+        // 不同就说明密钥派生有问题，问题在 HKDF / 输入，而不在 GCM 本身。
+        LogX.i(TAG, "frame encryption enabled phone2pc=${created.sendKeyFingerprint}")
         return true
     }
 
@@ -674,7 +687,16 @@ internal class DesktopBridgeServer(
             // writeFrame 有两个调用线程（主线程回 Pigeon 结果、读帧线程回 pong），
             // 若在调用线程加密，两边可能分别拿到序号 5 和 6，却按 6、5 的顺序落盘，
             // 对端会因为"计数器回退"把后到的那帧当成重放拒掉。
-            val line = (if (active == null) plaintext else active.seal(plaintext)) + "\n"
+            val line = try {
+                (if (active == null) plaintext else active.seal(plaintext)) + "\n"
+            } catch (t: Throwable) {
+                // 加密失败是**致命**的：不能退回明文发出去（那是静默降级），
+                // 也不能只记一笔日志——那会表现为"帧根本没出去、对端等不到响应
+                // 然后断开"，安静得查不出来。这里直接断开，让重连把问题暴露出来。
+                LogX.e(TAG, "seal frame failed, closing connection:", t)
+                closeQuietly(client)
+                return@execute
+            }
             synchronized(writeLock) {
                 try {
                     writer.write(line)

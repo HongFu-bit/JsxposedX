@@ -43,6 +43,10 @@ Future<void> main() async {
   );
   const token = String.fromEnvironment('BRIDGE_TOKEN');
 
+  // 排查用：关掉 LAN 链路的帧加密，把"加密引起的故障"和"别处的故障"分开。
+  // 只在诊断时使用——关掉之后这条链路是明文（见 RemoteBridgeClient.secureTransport）。
+  const noEncrypt = bool.fromEnvironment('BRIDGE_NO_ENCRYPT');
+
   runApp(
     ProviderScope(
       // 桌面端没有悬浮窗：把宿主运行时换成替身，否则内存工具面板在构建时
@@ -56,6 +60,7 @@ Future<void> main() async {
         initialPort: port,
         initialToken: token,
         autoConnect: token.isNotEmpty,
+        secureTransport: !noEncrypt,
       ),
     ),
   );
@@ -67,11 +72,15 @@ class DesktopApp extends StatefulWidget {
     this.initialPort = BridgeProtocol.defaultPort,
     this.initialToken = '',
     this.autoConnect = false,
+    this.secureTransport = true,
   });
 
   final int initialPort;
   final String initialToken;
   final bool autoConnect;
+
+  /// 是否启用 LAN 链路的帧加密。排查问题时用 `BRIDGE_NO_ENCRYPT` 关掉。
+  final bool secureTransport;
 
   @override
   State<DesktopApp> createState() => _DesktopAppState();
@@ -93,9 +102,13 @@ class _DesktopAppState extends State<DesktopApp> {
     _port = widget.initialPort;
     _token = widget.initialToken;
     _autoConnectPending = widget.autoConnect && _token.isNotEmpty;
-    _lan = LanBridgeController();
+    _lan = LanBridgeController(secureTransport: widget.secureTransport);
     _client = _createClient(_port, _token);
     _lan.stream.listen(_onLanState);
+
+    // 已经有配对过的手机就自动开监听——否则手机在自动重连、电脑却没在等，
+    // 两边永远对不上（见 LanBridgeController.autoResumeIfPaired 的说明）。
+    unawaited(_lan.autoResumeIfPaired());
   }
 
   @override

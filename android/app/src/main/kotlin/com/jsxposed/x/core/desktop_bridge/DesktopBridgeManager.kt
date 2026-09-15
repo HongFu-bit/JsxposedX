@@ -225,8 +225,13 @@ object DesktopBridgeManager {
     fun isUsbConnected(): Boolean =
         server?.let { it.hasClient() && it.currentClientKind() == BridgeProtocol.TRANSPORT_USB } == true
 
+    /** LAN 是否**真的**连上了（校验通过）。USB 没有加密协商，所以那条不用这个判据。 */
     fun isLanConnected(): Boolean =
-        server?.let { it.hasClient() && it.currentClientKind() == BridgeProtocol.TRANSPORT_LAN } == true
+        server?.let {
+            it.hasClient() &&
+                it.currentClientKind() == BridgeProtocol.TRANSPORT_LAN &&
+                it.isSecured()
+        } == true
 
     /** 是否已有 LAN 拨号目标（不代表已连上）。 */
     fun hasLanTarget(): Boolean = lanHost != null

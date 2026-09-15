@@ -119,6 +119,7 @@ class RemoteBridgeClient {
     this.listener,
     this.pairingCode,
     this.phoneStore,
+    this.secureTransport = true,
   }) : assert(
           listener == null || (pairingCode != null && phoneStore != null),
           '监听模式必须同时提供 pairingCode 与 phoneStore，否则无法校验对端',
@@ -130,6 +131,16 @@ class RemoteBridgeClient {
 
   /// 拨号模式下放进 `hello` 的令牌（USB 链路用它；LAN 链路用不到）。
   final String token;
+
+  /// 是否启用帧加密（§7.6）。
+  ///
+  /// **只在排查问题时才关**（`--dart-define=BRIDGE_NO_ENCRYPT=true`）。
+  /// 关掉之后这条链路退化成明文，用途是把"加密引起的故障"和"别处的故障"
+  /// 分开——加密的失败是静默的（GCM 校验不通过只返回 null），只靠日志
+  /// 很难断定它是不是元凶，容易在两件事之间来回猜。
+  ///
+  /// 关掉时两端都会保持在明文：电脑不发 `secured`，手机也就不会启用加密。
+  final bool secureTransport;
 
   /// 非 null 即进入**监听模式**：socket 从它来，校验由本类做。
   final LanListener? listener;
@@ -488,10 +499,34 @@ class RemoteBridgeClient {
       // 校验通过。`secured` 是**明文发送的最后一帧**：两端都在它之后启用帧加密，
       // 所以它自己不能是加密的（§7.6）。
       final sessionToken = validation.sessionToken;
-      if (sessionToken != null && sessionToken.isNotEmpty) {
+      if (!secureTransport) {
+        debugPrint('[desktop-bridge] 帧加密已禁用（BRIDGE_NO_ENCRYPT），本连接为明文');
+      } else if (sessionToken != null && sessionToken.isNotEmpty) {
+        // **先派生 + 自检，再发 `secured`。**
+        // 顺序反过来的话，手机已经收到 secured、启用了加密，而本端却因为自检失败
+        // 什么都没发出去——对端只会看到一条沉默的连接，正是最难查的那种故障。
+        final BridgeCipher cipher;
+        try {
+          cipher = BridgeCipher.fromSessionToken(sessionToken);
+        } catch (error, stack) {
+          debugPrint('[desktop-bridge] 加密初始化失败，拒绝本次连接：$error');
+          debugPrintStack(stackTrace: stack);
+          unawaited(
+            _rejectAndDrop(
+              _rejectFrame(
+                BridgeProtocol.errInternal,
+                '电脑端加密初始化失败：$error',
+              ),
+            ),
+          );
+          return;
+        }
+
         _send(<String, Object?>{BridgeProtocol.kType: BridgeProtocol.tSecured});
-        _cipher = BridgeCipher.fromSessionToken(sessionToken);
-        debugPrint('[desktop-bridge] 帧加密已启用');
+        _cipher = cipher;
+        // 指纹：电脑的 pc2phone 应当等于手机的 phone2pc——同一把密钥的两个方向视角。
+        // 两端这两个数不同，就说明密钥派生（HKDF 输入 / info 标签）不一致。
+        debugPrint('[desktop-bridge] 帧加密已启用 pc2phone=${cipher.sendKeyFingerprint}');
       }
     }
 
@@ -541,18 +576,23 @@ class RemoteBridgeClient {
     // 版本协商：手机必须声明支持帧加密。缺了它就**明确拒绝**，而不是静默退回明文——
     // 静默退回等于给攻击者留了一个降级开关（把 welcome 里的 caps 抹掉即可）。
     // 实际后果也只是"新旧版本不能混用"，并且在界面上给出一句能看懂的话。
-    final caps = frame[BridgeProtocol.kCaps];
-    final cipherName = caps is Map<String, dynamic>
-        ? caps[BridgeProtocol.kCipher]
-        : null;
-    if (cipherName != BridgeProtocol.cipherA256Gcm) {
-      return (
-        reject: _rejectFrame(
-          BridgeProtocol.errProtocol,
-          '手机端版本过旧（不支持帧加密），请更新手机上的 JsxposedX。',
-        ),
-        sessionToken: null,
-      );
+    //
+    // 唯一例外是排查用的 BRIDGE_NO_ENCRYPT：那时本端本来就用明文，
+    // 也就没有"降级"可言。
+    if (secureTransport) {
+      final caps = frame[BridgeProtocol.kCaps];
+      final cipherName = caps is Map<String, dynamic>
+          ? caps[BridgeProtocol.kCipher]
+          : null;
+      if (cipherName != BridgeProtocol.cipherA256Gcm) {
+        return (
+          reject: _rejectFrame(
+            BridgeProtocol.errProtocol,
+            '手机端版本过旧（不支持帧加密），请更新手机上的 JsxposedX。',
+          ),
+          sessionToken: null,
+        );
+      }
     }
 
     // 路径一：会话令牌。**不受限速与节流影响**（§9.2）——令牌是 128 bit 随机值，
@@ -758,12 +798,25 @@ class RemoteBridgeClient {
     if (socket == null) {
       return;
     }
+
+    late final String line;
     try {
       // 加密**同步完成**：加密序号必须严格按发送顺序递增。
-      // 挪到异步里就可能乱序，对端会因为"计数器回退"把帧当成重放拒掉。
       final active = _cipher;
       final text = jsonEncode(frame);
-      socket.write('${active == null ? text : active.seal(text)}\n');
+      line = '${active == null ? text : active.seal(text)}\n';
+    } catch (error, stack) {
+      // 加密失败与发送失败必须分开处理：加密失败是**致命**的，
+      // 不能退回明文发出去（那是静默降级），也不能像普通写失败那样只记一笔日志——
+      // 那会表现为"帧根本没出去、对端等不到响应然后断开"，安静得查不出来。
+      debugPrint('[desktop-bridge] 加密失败，本帧不发送：$error');
+      debugPrintStack(stackTrace: stack);
+      _handleDisconnected('加密失败：$error');
+      return;
+    }
+
+    try {
+      socket.write(line);
     } catch (error) {
       debugPrint('[desktop-bridge] 发送失败：$error');
     }

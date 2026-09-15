@@ -3,6 +3,7 @@ package com.jsxposed.x.core.desktop_bridge
 import android.util.Base64
 import org.json.JSONObject
 import java.nio.ByteBuffer
+import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -37,6 +38,19 @@ internal class BridgeCipher private constructor(
 
     /** 对端发来帧的最大计数器，用来挡重放。 */
     private var lastReceiveSeq = 0L
+
+    /**
+     * 派生出的**发送密钥**的指纹（SHA-256 前 8 个 hex 字符）。纯诊断用。
+     *
+     * 加密相关的故障大多是"两端密钥不一致"，而那种失败是静默的（GCM 校验
+     * 不通过就返回 null），日志里只会看到"连上就断"。两端各打一行指纹即可判断。
+     * 泄漏它无害——SHA-256 不可逆。
+     */
+    val sendKeyFingerprint: String
+        get() = MessageDigest.getInstance("SHA-256")
+            .digest(sendKey)
+            .take(4)
+            .joinToString("") { "%02x".format(it) }
 
     /** 把一帧明文 JSON 封装成外层 `enc` 帧的 JSON 文本。 */
     fun seal(plaintextJson: String): String {
@@ -85,6 +99,42 @@ internal class BridgeCipher private constructor(
         return String(plain, Charsets.UTF_8)
     }
 
+    /**
+     * 自检：用一把**一次性密钥**把一段探针加密再解回来，验证本端的 GCM 实现自洽。
+     *
+     * 不用真实密钥，是为了避免占用一个 nonce——GCM 下 nonce 复用是灾难性的。
+     * 一次性密钥足以覆盖这里要验的东西：本端实现是否自洽。
+     *
+     * 它**验不出**跨语言差异（nonce 构造、AAD、HKDF 输入是否与 Dart 侧一致），
+     * 那要靠两端各打一行的密钥指纹去比对。
+     */
+    private fun verifySelfTest() {
+        val probeKey = ByteArray(KEY_BYTES) { 0x5A }
+        val nonce = ByteArray(NONCE_BYTES) { 0x5A }
+        val probe = "jsxposedx-bridge-selftest".toByteArray(Charsets.UTF_8)
+
+        val sealed = gcm(
+            forEncryption = true,
+            key = probeKey,
+            nonce = nonce,
+            input = probe,
+        )
+        val expected = probe.size + TAG_BITS / 8
+        require(sealed.size == expected) {
+            "GCM 自检失败：密文 ${sealed.size} 字节，期望 $expected（密文应为「明文 + 16 字节 tag」）"
+        }
+
+        val opened = gcm(
+            forEncryption = false,
+            key = probeKey,
+            nonce = nonce,
+            input = sealed,
+        )
+        require(opened.contentEquals(probe)) {
+            "GCM 自检失败：解密结果与明文不一致"
+        }
+    }
+
     /** 12 字节 nonce = 4 字节 0 前缀 + 8 字节大端计数器。 */
     private fun nonceFor(seq: Long): ByteArray {
         val nonce = ByteArray(NONCE_BYTES)
@@ -129,14 +179,20 @@ internal class BridgeCipher private constructor(
          *
          * 注意方向与电脑侧**相反**：手机发出的用 `phone2pc`，收的用 `pc2phone`。
          *
+         * **派生完立刻做一次自检**（[verifySelfTest]），失败会抛异常。
+         * 调用方应当把它当作致命错误：加密实现坏了的话，最好的结果是当场报错，
+         * 最坏的结果是安静地连上又断开——而那正是最难查的一种故障。
+         *
          * @throws IllegalArgumentException 令牌不是 64 个 hex 字符。
          */
         internal fun fromSessionToken(sessionToken: String): BridgeCipher {
             val ikm = decodeHex(sessionToken)
-            return BridgeCipher(
+            val cipher = BridgeCipher(
                 sendKey = hkdf(ikm, INFO_PHONE2_PC.toByteArray(Charsets.UTF_8)),
                 receiveKey = hkdf(ikm, INFO_PC2_PHONE.toByteArray(Charsets.UTF_8)),
             )
+            cipher.verifySelfTest()
+            return cipher
         }
 
         /** HKDF-SHA256（RFC 5869）。输出固定 32 字节，因此 expand 只跑一轮。 */

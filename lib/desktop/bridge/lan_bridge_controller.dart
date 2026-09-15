@@ -68,7 +68,11 @@ class LanSnapshot {
 /// - 地址枚举与"记住用户选的网卡"（§10.4）
 /// - 监听模式下的 [RemoteBridgeClient]：**校验对端凭据**（§7.2、§7.3）
 class LanBridgeController {
-  LanBridgeController();
+  LanBridgeController({this.secureTransport = true});
+
+  /// 是否启用帧加密（§7.6）。排查问题时可以用
+  /// `--dart-define=BRIDGE_NO_ENCRYPT=true` 关掉，见 [RemoteBridgeClient.secureTransport]。
+  final bool secureTransport;
 
   /// 端口回退范围，与 `BridgeProtocol.defaultPort` / `maxPortFallback` 保持一致。
   static const int _fallbackBase = BridgeProtocol.defaultPort;
@@ -210,6 +214,7 @@ class LanBridgeController {
         listener: _listener,
         pairingCode: _pairingCode,
         phoneStore: _phoneStore,
+        secureTransport: secureTransport,
       );
       _client = client;
       _clientPhaseSubscription = client.phaseStream.listen(_onClientPhase);

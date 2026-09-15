@@ -66,6 +66,9 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
   /// 当前显示哪一档。默认 USB，保持改动前的行为不变。
   _ConnectMode _mode = _ConnectMode.usb;
 
+  /// 用户是否手动切过档。切过之后就不再自动跳到 Wi-Fi 那一档。
+  bool _modeTouched = false;
+
   LanSnapshot? _lanSnapshot;
   StreamSubscription<LanSnapshot>? _lanSubscription;
 
@@ -81,10 +84,26 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
     final lan = widget.lanController;
     if (lan != null) {
       _lanSnapshot = lan.snapshot;
+      // 控制器可能在我订阅之前就已经开始等待了（autoResumeIfPaired 是异步的），
+      // 那种情况下面这个流监听收不到那一次事件，所以这里先按当前快照判一次。
+      if (_mode == _ConnectMode.usb && lan.snapshot.phase != LanPhase.idle) {
+        _mode = _ConnectMode.wifi;
+      }
       _lanSubscription = lan.stream.listen((snapshot) {
-        if (mounted) {
-          setState(() => _lanSnapshot = snapshot);
+        if (!mounted) {
+          return;
         }
+        setState(() {
+          _lanSnapshot = snapshot;
+          // 桌面端在有配对记录时会自动开始等待（LanBridgeController.autoResumeIfPaired）。
+          // 那种情况下端口已经开着、6 位码正在轮换，界面必须跟着跳过去，
+          // 否则用户对着 USB 页面完全不知道发生了什么。
+          if (!_modeTouched &&
+              _mode == _ConnectMode.usb &&
+              snapshot.phase != LanPhase.idle) {
+            _mode = _ConnectMode.wifi;
+          }
+        });
       });
     }
 
@@ -415,7 +434,11 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
         if (next == _mode) {
           return;
         }
-        setState(() => _mode = next);
+        setState(() {
+          _mode = next;
+          // 用户既然手动切过，就别再自动跳档了。
+          _modeTouched = true;
+        });
         // 切走时把等待停掉：电脑只在"等待连接"期间监听，
         // 让用户在别的页面上还开着端口是不必要的暴露（§7.5）。
         if (next == _ConnectMode.usb) {
@@ -462,7 +485,9 @@ class _DesktopConnectGateState extends State<DesktopConnectGate> {
             ? '已连接：${snapshot.device?.model ?? '手机'}'
             : null,
         pairedPhoneCount: snapshot.pairedCount,
-        onDisconnect: () => unawaited(lan.stopWaiting()),
+        // 用 disconnectPhone 而不是 stopWaiting：面板上写着"断开后才会重新开始等待"，
+        // 所以断开之后要立刻重新 bind、换一组新码，等下一次配对。
+        onDisconnect: () => unawaited(lan.disconnectPhone()),
         errorText: snapshot.error,
       ),
       const SizedBox(height: 14),
